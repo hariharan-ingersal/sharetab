@@ -127,6 +127,7 @@
     "amount": "Montant",
     "submit": "Enregistrer le paiement",
     "submitting": "Enregistrement...",
+    "unconfirmed": "Nous n’avons pas pu confirmer l’enregistrement du paiement. Réessayez : il ne sera pas enregistré deux fois.",
     "description": "Enregistrez un paiement entre deux membres du groupe.",
     "selectMember": "Sélectionner un membre",
     "useSuggested": "Utiliser le montant suggéré : {amount}",

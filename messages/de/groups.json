@@ -127,6 +127,7 @@
     "amount": "Betrag",
     "submit": "Zahlung erfassen",
     "submitting": "Erfassen...",
+    "unconfirmed": "Wir konnten nicht bestätigen, dass die Zahlung erfasst wurde. Versuchen Sie es erneut – sie wird nicht doppelt erfasst.",
     "description": "Erfasse eine Zahlung zwischen zwei Gruppenmitgliedern.",
     "selectMember": "Mitglied auswählen",
     "useSuggested": "Vorgeschlagen verwenden: {amount}",

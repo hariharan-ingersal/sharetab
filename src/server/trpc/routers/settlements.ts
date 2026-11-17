@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { AppError } from '@/server/lib/app-error';
 import { createTRPCRouter, groupMemberProcedure } from '../init';
-import type { Prisma } from '@/generated/prisma/client';
+import { Prisma } from '@/generated/prisma/client';
 import { getExchangeRate, convertCents } from '../../lib/exchange-rates';
 import { MAX_MONEY_CENTS, currencyStep } from '@/lib/money';
 import { loadGroupBalances, lockActiveGroup } from '../../lib/group-balances';
@@ -48,6 +48,39 @@ async function requireSettleableParties(
   }
 }
 
+/**
+ * The payment an earlier try of this attempt recorded, when there is one: a second click, or a retry
+ * after an answer that never arrived, sends the attempt's `requestKey` again, and gets the payment
+ * the first one recorded back instead of recording another. Called after the caller's access checks,
+ * which a key never skips. Only the same payment, in the same group, recorded by the same person,
+ * is given back: anything else sent with a key already used is refused, and records nothing.
+ */
+async function findRecordedAttempt(
+  db: Prisma.TransactionClient,
+  requestKey: string,
+  attempt: { groupId: string; fromId: string; toId: string; amount: number; currency: string; userId: string },
+) {
+  const stored = await db.settlement.findUnique({ where: { requestKey } });
+  if (!stored) {
+    return null;
+  }
+  const recorded = await db.activityLog.findFirst({
+    where: { type: 'SETTLEMENT_CREATED', entityId: stored.id },
+    select: { userId: true },
+  });
+  const same =
+    stored.groupId === attempt.groupId &&
+    stored.fromId === attempt.fromId &&
+    stored.toId === attempt.toId &&
+    stored.amount === attempt.amount &&
+    stored.currency === attempt.currency &&
+    recorded?.userId === attempt.userId;
+  if (!same) {
+    throw new AppError('CONFLICT');
+  }
+  return stored;
+}
+
 // Who may delete a payment, and so restore it (#327). A member can only record a payment
 // from themselves, so the payer is whoever recorded it unless an owner/admin recorded it
 // for them. The recipient can't: deleting it would let them deny being paid.
@@ -71,6 +104,8 @@ export const settlementsRouter = createTRPCRouter({
         where: { groupId: input.groupId, ...(input.deleted ? onlyDeleted : notDeleted) },
         take: input.limit + 1,
         ...(input.cursor ? { cursor: { id: input.cursor } } : {}),
+        // Only the form that made an attempt's key sends it
+        omit: { requestKey: true },
         include: {
           from: { select: { id: true, name: true, email: true, image: true } },
           to: { select: { id: true, name: true, email: true, image: true } },
@@ -103,20 +138,13 @@ export const settlementsRouter = createTRPCRouter({
           .default('USD'),
         exchangeRate: z.number().positive().finite().max(1_000_000).optional(), // manual override
         note: z.string().max(500).optional(),
+        // The id of this attempt to record a payment, made by the form and sent again by its
+        // retries: the first try that lands records the payment, and the others get it back
+        requestKey: z.string().uuid().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
       const effectiveFromId = input.fromId ?? ctx.user.id;
-
-      // Refuse an archived group before the checks and rate lookup below;
-      // lockActiveGroup in the transaction is the check that holds (#289)
-      const group = await ctx.db.group.findUnique({
-        where: { id: input.groupId },
-        select: { archivedAt: true, currency: true },
-      });
-      if (group?.archivedAt) {
-        throw new AppError('BAD_REQUEST', 'archivedCreateSettlement');
-      }
 
       // Cannot settle with yourself
       if (effectiveFromId === input.toId) {
@@ -126,6 +154,33 @@ export const settlementsRouter = createTRPCRouter({
       // Security: non-admin members can only create settlements from themselves
       if (ctx.membership.role === 'MEMBER' && input.fromId && input.fromId !== ctx.user.id) {
         throw new AppError('FORBIDDEN', 'paymentsFromYourselfOnly');
+      }
+
+      // A try of an attempt that already recorded its payment gets that payment back, before the
+      // checks below: they held when it was recorded, and may not now (the group archived since)
+      const attempt = {
+        groupId: input.groupId,
+        fromId: effectiveFromId,
+        toId: input.toId,
+        amount: input.amount,
+        currency: input.currency,
+        userId: ctx.user.id,
+      };
+      if (input.requestKey) {
+        const recorded = await findRecordedAttempt(ctx.db, input.requestKey, attempt);
+        if (recorded) {
+          return recorded;
+        }
+      }
+
+      // Refuse an archived group before the checks and rate lookup below;
+      // lockActiveGroup in the transaction is the check that holds (#289)
+      const group = await ctx.db.group.findUnique({
+        where: { id: input.groupId },
+        select: { archivedAt: true, currency: true },
+      });
+      if (group?.archivedAt) {
+        throw new AppError('BAD_REQUEST', 'archivedCreateSettlement');
       }
 
       // Amounts in a currency with no decimals are whole units (#335), except a payment in the
@@ -156,54 +211,69 @@ export const settlementsRouter = createTRPCRouter({
         baseCurrencyAmount = convertCents(input.amount, exchangeRate, groupCurrency);
       }
 
-      const settlement = await ctx.db.$transaction(async (tx) => {
-        await lockActiveGroup(tx, input.groupId, 'archivedCreateSettlement');
-        if (!wholeUnits) {
-          const balances = await loadGroupBalances(tx, input.groupId);
-          const net = (userId: string) => balances.find((b) => b.userId === userId)?.net ?? 0;
-          const listedDebt = simplifyDebts(balances).some(
-            (d) => d.from === effectiveFromId && d.to === input.toId && d.amount === input.amount,
+      const record = () =>
+        ctx.db.$transaction(async (tx) => {
+          await lockActiveGroup(tx, input.groupId, 'archivedCreateSettlement');
+          if (!wholeUnits) {
+            const balances = await loadGroupBalances(tx, input.groupId);
+            const net = (userId: string) => balances.find((b) => b.userId === userId)?.net ?? 0;
+            const listedDebt = simplifyDebts(balances).some(
+              (d) => d.from === effectiveFromId && d.to === input.toId && d.amount === input.amount,
+            );
+            if (!listedDebt && input.amount !== -net(effectiveFromId) && input.amount !== net(input.toId)) {
+              throw new AppError('BAD_REQUEST', 'amountNotWholeUnits', { currency: input.currency });
+            }
+          }
+          // Balances are in the group's currency
+          await requireSettleableParties(
+            tx,
+            input.groupId,
+            effectiveFromId,
+            input.toId,
+            baseCurrencyAmount ?? input.amount,
           );
-          if (!listedDebt && input.amount !== -net(effectiveFromId) && input.amount !== net(input.toId)) {
-            throw new AppError('BAD_REQUEST', 'amountNotWholeUnits', { currency: input.currency });
+
+          const created = await tx.settlement.create({
+            data: {
+              groupId: input.groupId,
+              fromId: effectiveFromId,
+              toId: input.toId,
+              amount: input.amount,
+              currency: input.currency,
+              exchangeRate: exchangeRate ?? 1.0,
+              baseCurrencyAmount,
+              ...(input.note !== undefined ? { note: input.note } : {}),
+              ...(input.requestKey !== undefined ? { requestKey: input.requestKey } : {}),
+            },
+          });
+
+          await tx.activityLog.create({
+            data: {
+              groupId: input.groupId,
+              userId: ctx.user.id,
+              type: 'SETTLEMENT_CREATED',
+              entityId: created.id,
+              metadata: { toId: input.toId, amount: input.amount },
+            },
+          });
+
+          return created;
+        });
+
+      try {
+        return await record();
+      } catch (error) {
+        // Another try of this attempt recorded it while this one was on its way: requestKey is the
+        // only unique column a new payment can collide on. Its transaction has committed, so the
+        // payment it recorded is read back and given back, checked as above
+        if (input.requestKey && error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+          const recorded = await findRecordedAttempt(ctx.db, input.requestKey, attempt);
+          if (recorded) {
+            return recorded;
           }
         }
-        // Balances are in the group's currency
-        await requireSettleableParties(
-          tx,
-          input.groupId,
-          effectiveFromId,
-          input.toId,
-          baseCurrencyAmount ?? input.amount,
-        );
-
-        const created = await tx.settlement.create({
-          data: {
-            groupId: input.groupId,
-            fromId: effectiveFromId,
-            toId: input.toId,
-            amount: input.amount,
-            currency: input.currency,
-            exchangeRate: exchangeRate ?? 1.0,
-            baseCurrencyAmount,
-            ...(input.note !== undefined ? { note: input.note } : {}),
-          },
-        });
-
-        await tx.activityLog.create({
-          data: {
-            groupId: input.groupId,
-            userId: ctx.user.id,
-            type: 'SETTLEMENT_CREATED',
-            entityId: created.id,
-            metadata: { toId: input.toId, amount: input.amount },
-          },
-        });
-
-        return created;
-      });
-
-      return settlement;
+        throw error;
+      }
     }),
 
   delete: groupMemberProcedure

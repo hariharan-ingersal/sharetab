@@ -132,6 +132,7 @@
     "notePlaceholder": "e.g., Venmo, cash",
     "submit": "Record Payment",
     "submitting": "Recording...",
+    "unconfirmed": "We couldn’t confirm that the payment was recorded. Try again — it won’t be recorded twice.",
     "unnamed": "Unnamed"
   },
   "invite": {

@@ -11,7 +11,7 @@ const mockDb = {
   groupMember: { findUnique: vi.fn(), findMany: vi.fn(), count: vi.fn() },
   expense: { findMany: vi.fn() },
   settlement: { findUnique: vi.fn(), findMany: vi.fn(), create: vi.fn(), update: vi.fn(), updateMany: vi.fn() },
-  activityLog: { create: vi.fn() },
+  activityLog: { create: vi.fn(), findFirst: vi.fn() },
   $transaction: vi.fn(),
   $queryRaw: vi.fn(),
 };
@@ -653,5 +653,143 @@ describe('a payment in a currency with no decimals', () => {
     const api = await caller('bob');
     await api.create({ groupId: 'g1', toId: 'alice', amount: 1000, currency: 'USD', exchangeRate: 150.3271 });
     expect(mockDb.settlement.create.mock.calls[0]![0].data).toMatchObject({ amount: 1000, baseCurrencyAmount: 150300 });
+  });
+});
+
+// A second click, or a retry after an answer that never arrived, sends the form's attempt key again:
+// it gets back the payment the first send recorded, and records nothing more
+describe('recording a payment with an attempt key', () => {
+  const key = '0b6b6c1e-3f0a-4a8e-9a57-1c2d3e4f5a6b';
+  const recorded = {
+    id: 's9',
+    groupId: 'g1',
+    fromId: 'bob',
+    toId: 'alice',
+    amount: 500,
+    currency: 'USD',
+    requestKey: key,
+  };
+
+  beforeEach(() => {
+    mockDb.group.findUnique.mockResolvedValue({ archivedAt: null, currency: 'USD' });
+    mockDb.groupMember.count.mockResolvedValue(2);
+    mockDb.settlement.findUnique.mockResolvedValue(null);
+    mockDb.settlement.create.mockResolvedValue(recorded);
+    mockDb.activityLog.findFirst.mockResolvedValue({ userId: 'bob' });
+  });
+
+  test('the first send records the payment with its key', async () => {
+    asRole('MEMBER', 'bob');
+    const api = await caller('bob');
+    await expect(api.create({ groupId: 'g1', toId: 'alice', amount: 500, requestKey: key })).resolves.toEqual(recorded);
+    expect(mockDb.settlement.findUnique).toHaveBeenCalledWith({ where: { requestKey: key } });
+    expect(mockDb.settlement.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ requestKey: key, fromId: 'bob', toId: 'alice', amount: 500 }),
+    });
+  });
+
+  test('a later send of the same attempt gets that payment back and records nothing', async () => {
+    mockDb.settlement.findUnique.mockResolvedValue(recorded);
+    asRole('MEMBER', 'bob');
+    const api = await caller('bob');
+    await expect(api.create({ groupId: 'g1', toId: 'alice', amount: 500, requestKey: key })).resolves.toEqual(recorded);
+    expect(mockDb.$transaction).not.toHaveBeenCalled();
+    expect(mockDb.settlement.create).not.toHaveBeenCalled();
+    expect(mockDb.activityLog.create).not.toHaveBeenCalled();
+  });
+
+  test('it is answered even when the group was archived after the payment was recorded', async () => {
+    mockDb.settlement.findUnique.mockResolvedValue(recorded);
+    mockDb.group.findUnique.mockResolvedValue({ archivedAt: new Date(), currency: 'USD' });
+    asRole('MEMBER', 'bob');
+    const api = await caller('bob');
+    await expect(api.create({ groupId: 'g1', toId: 'alice', amount: 500, requestKey: key })).resolves.toEqual(recorded);
+  });
+
+  test.each([
+    ['another amount', { amount: 600 }],
+    ['another recipient', { toId: 'carol' }],
+    ['another currency', { currency: 'EUR', exchangeRate: 1.1 }],
+  ])('the key sent with %s is refused, recording nothing', async (_name, change) => {
+    mockDb.settlement.findUnique.mockResolvedValue(recorded);
+    asRole('MEMBER', 'bob');
+    const api = await caller('bob');
+    await expect(
+      api.create({ groupId: 'g1', toId: 'alice', amount: 500, requestKey: key, ...change }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(mockDb.settlement.create).not.toHaveBeenCalled();
+  });
+
+  test('the key of a payment in another group is refused', async () => {
+    mockDb.settlement.findUnique.mockResolvedValue({ ...recorded, groupId: 'g2' });
+    asRole('MEMBER', 'bob');
+    const api = await caller('bob');
+    await expect(api.create({ groupId: 'g1', toId: 'alice', amount: 500, requestKey: key })).rejects.toMatchObject({
+      code: 'CONFLICT',
+    });
+    expect(mockDb.settlement.create).not.toHaveBeenCalled();
+  });
+
+  test('only whoever recorded it gets it back: an admin sending its key for the same payment is refused', async () => {
+    mockDb.settlement.findUnique.mockResolvedValue(recorded);
+    asRole('ADMIN', 'alice');
+    const api = await caller('alice');
+    await expect(
+      api.create({ groupId: 'g1', fromId: 'bob', toId: 'alice', amount: 500, requestKey: key }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(mockDb.settlement.create).not.toHaveBeenCalled();
+  });
+
+  test('a key never skips the access checks: a member sending one for a payment from someone else', async () => {
+    mockDb.settlement.findUnique.mockResolvedValue({ ...recorded, fromId: 'carol' });
+    asRole('MEMBER', 'bob');
+    const api = await caller('bob');
+    await expect(
+      api.create({ groupId: 'g1', fromId: 'carol', toId: 'alice', amount: 500, requestKey: key }),
+    ).rejects.toMatchObject({ code: 'FORBIDDEN', messageKey: 'paymentsFromYourselfOnly' });
+    expect(mockDb.settlement.findUnique).not.toHaveBeenCalled();
+  });
+
+  test('a key never skips the membership check', async () => {
+    mockDb.settlement.findUnique.mockResolvedValue(recorded);
+    mockDb.groupMember.findUnique.mockResolvedValue(null);
+    const api = await caller('mallory');
+    await expect(api.create({ groupId: 'g1', toId: 'alice', amount: 500, requestKey: key })).rejects.toMatchObject({
+      code: 'FORBIDDEN',
+    });
+    expect(mockDb.settlement.findUnique).not.toHaveBeenCalled();
+    expect(mockDb.settlement.create).not.toHaveBeenCalled();
+  });
+
+  test('two sends at once: the one that loses on the unique key gets the winner’s payment back', async () => {
+    const { Prisma } = await import('@/generated/prisma/client');
+    mockDb.settlement.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(recorded);
+    mockDb.settlement.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the fields: (`requestKey`)', {
+        code: 'P2002',
+        clientVersion: 'test',
+      }),
+    );
+    asRole('MEMBER', 'bob');
+    const api = await caller('bob');
+    await expect(api.create({ groupId: 'g1', toId: 'alice', amount: 500, requestKey: key })).resolves.toEqual(recorded);
+  });
+
+  test('without a key a payment is recorded as before, with no lookup', async () => {
+    asRole('MEMBER', 'bob');
+    const api = await caller('bob');
+    await api.create({ groupId: 'g1', toId: 'alice', amount: 500 });
+    expect(mockDb.settlement.findUnique).not.toHaveBeenCalled();
+    expect(mockDb.settlement.create).toHaveBeenCalledWith({
+      data: expect.not.objectContaining({ requestKey: expect.anything() }),
+    });
+  });
+
+  test('a key that is not a uuid is refused by validation', async () => {
+    asRole('MEMBER', 'bob');
+    const api = await caller('bob');
+    await expect(api.create({ groupId: 'g1', toId: 'alice', amount: 500, requestKey: 'abc' })).rejects.toMatchObject({
+      code: 'BAD_REQUEST',
+    });
   });
 });

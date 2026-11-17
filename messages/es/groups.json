@@ -132,6 +132,7 @@
     "notePlaceholder": "p. ej., Venmo, efectivo",
     "submit": "Registrar pago",
     "submitting": "Registrando...",
+    "unconfirmed": "No pudimos confirmar que el pago se registró. Inténtalo de nuevo: no se registrará dos veces.",
     "unnamed": "Sin nombre"
   },
   "invite": {
