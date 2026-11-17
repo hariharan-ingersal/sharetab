@@ -136,7 +136,8 @@
     "validationNameRequired": "Artikelnamn krävs.",
     "validationPricePositive": "Priset måste vara större än noll.",
     "validationQtyPositive": "Antal måste vara ett positivt heltal.",
-    "receiptImageAlt": "Kvitto"
+    "receiptImageAlt": "Kvitto",
+    "locked": "Det här kvittot har använts för en utgift, eller så är gruppen arkiverad, så det kan inte ändras här. Redigera utgiften för att rätta fördelningen."
   },
   "splits": {
     "selectAll": "Välj alla",

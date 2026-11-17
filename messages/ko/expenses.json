@@ -136,7 +136,8 @@
     "validationNameRequired": "항목 이름은 필수입니다.",
     "validationPricePositive": "가격은 0보다 커야 합니다.",
     "validationQtyPositive": "수량은 양의 정수여야 합니다.",
-    "receiptImageAlt": "영수증"
+    "receiptImageAlt": "영수증",
+    "locked": "이 영수증은 이미 지출에 사용되었거나 그룹이 보관되어 여기서 변경할 수 없습니다. 분할을 수정하려면 지출을 편집하세요."
   },
   "splits": {
     "selectAll": "전체 선택",

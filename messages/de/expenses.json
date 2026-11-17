@@ -136,7 +136,8 @@
     "validationNameRequired": "Artikelname ist erforderlich.",
     "validationPricePositive": "Der Preis muss größer als null sein.",
     "validationQtyPositive": "Die Menge muss eine positive ganze Zahl sein.",
-    "receiptImageAlt": "Beleg"
+    "receiptImageAlt": "Beleg",
+    "locked": "Dieser Beleg wurde bereits für eine Ausgabe verwendet oder seine Gruppe ist archiviert, daher kann er hier nicht geändert werden. Bearbeiten Sie die Ausgabe, um die Aufteilung zu korrigieren."
   },
   "splits": {
     "selectAll": "Alle auswählen",
