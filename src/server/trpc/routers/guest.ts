@@ -365,6 +365,11 @@ export const guestRouter = createTRPCRouter({
           logPrefix: 'guest.receipt',
         });
       } catch (error) {
+        // An expense was made from the receipt while it was being scanned (receipt-processor's
+        // lockEditableReceipt): the scan's result is dropped and the receipt isn't marked FAILED
+        if (error instanceof AppError) {
+          throw error;
+        }
         logger.error('guest.receipt.failed', {
           receiptId: input.receiptId,
           error: error instanceof Error ? error.message : 'Unknown',

@@ -25,7 +25,14 @@ const READS: Record<string, { count: number; why: string }> = {
     count: 12,
     why: 'expense counts skip them; the currency lock, history checks and saved receipts count them',
   },
-  'src/server/trpc/routers/receipts.ts': { count: 4, why: 'counts them: a deleted expense keeps its receipt' },
+  'src/server/trpc/routers/receipts.ts': {
+    count: 4,
+    why: 'counts them: a deleted expense keeps its receipt, which stays read-only (restoring brings it back as it was)',
+  },
+  'src/server/lib/receipt-processor.ts': {
+    count: 1,
+    why: 'counts them: lockEditableReceipt refuses changes to a receipt a deleted expense was made from, as to any other',
+  },
   'src/server/trpc/routers/settlements.ts': {
     count: 5,
     why: 'list skips them (or lists only them); delete and restore check deletedAt; create looks a payment up by its attempt key whether or not it was deleted since, since a retry of that attempt must not record it again',

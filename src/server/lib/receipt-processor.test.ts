@@ -41,6 +41,10 @@ describe('processReceiptImage fallback behavior', () => {
       receipt: {
         update: vi.fn().mockResolvedValue(undefined),
       },
+      // The receipt's row, locked before its items are replaced; no expense made from it
+      $queryRaw: vi.fn().mockResolvedValue([{ groupId: null }]),
+      expense: { findUnique: vi.fn().mockResolvedValue(null) },
+      group: { findUnique: vi.fn().mockResolvedValue(null) },
       // Interactive transaction: run the callback against the same mock
       $transaction: vi.fn((fn: (tx: unknown) => Promise<unknown>) => fn(db)),
     };
@@ -165,5 +169,80 @@ describe('processReceiptImage fallback behavior', () => {
     test('is the one the scan read when it read one', async () => {
       expect(await scan('GBP')).toEqual({ saved: 'GBP', returned: 'GBP' });
     });
+  });
+
+  // A scan can outlive its claim (a stale one is claimed again after 15 minutes): if an expense was
+  // made from the receipt meanwhile, its result is dropped and the receipt's items stay as they are
+  test('a scan finishing after an expense was made from the receipt changes nothing', async () => {
+    mockGetAIProvidersWithFallback.mockResolvedValue([
+      { name: 'openai', extractReceipt: vi.fn().mockResolvedValue(successResult) },
+    ]);
+    const { processReceiptImage } = await import('./receipt-processor');
+    const db = makeDbMock();
+    db.expense.findUnique.mockResolvedValue({ id: 'e1' });
+
+    await expect(
+      processReceiptImage({
+        db: db as never,
+        receiptId: 'r1',
+        receipt: { imagePath: 'r1.jpg', mimeType: 'image/jpeg' },
+        fallbackCurrency: 'USD',
+      }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST', messageKey: 'receiptAlreadyHasExpense' });
+    expect(db.receiptItem.deleteMany).not.toHaveBeenCalled();
+    expect(db.receiptItem.createMany).not.toHaveBeenCalled();
+    expect(db.receipt.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('lockEditableReceipt', () => {
+  function db({
+    receipt = [{ groupId: 'g1' }],
+    expense = null,
+    group = { archivedAt: null },
+  }: {
+    receipt?: { groupId: string | null }[];
+    expense?: { id: string } | null;
+    group?: { archivedAt: Date | null } | null;
+  } = {}) {
+    return {
+      $queryRaw: vi.fn().mockResolvedValue(receipt),
+      expense: { findUnique: vi.fn().mockResolvedValue(expense) },
+      group: { findUnique: vi.fn().mockResolvedValue(group) },
+    };
+  }
+  const lock = async (tx: ReturnType<typeof db>) => {
+    const { lockEditableReceipt } = await import('./receipt-processor');
+    return lockEditableReceipt(tx as never, 'r1');
+  };
+
+  test('a receipt with no expense, in an active group, may be changed, once its row is locked', async () => {
+    const tx = db();
+    await expect(lock(tx)).resolves.toBeUndefined();
+    const [strings] = tx.$queryRaw.mock.calls[0]!;
+    expect((strings as string[]).join('?')).toMatch(/FROM "Receipt" WHERE "id" = \? FOR NO KEY UPDATE/);
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.expense.findUnique.mock.invocationCallOrder[0]!);
+  });
+
+  test('one an expense was made from is refused: the lookup by receipt finds deleted expenses too', async () => {
+    const tx = db({ expense: { id: 'e1' } });
+    await expect(lock(tx)).rejects.toMatchObject({ code: 'BAD_REQUEST', messageKey: 'receiptAlreadyHasExpense' });
+    // No deletedAt filter: restoring brings a deleted expense back as it was
+    expect(tx.expense.findUnique).toHaveBeenCalledWith({ where: { receiptId: 'r1' }, select: { id: true } });
+  });
+
+  test('one in an archived group is refused', async () => {
+    const tx = db({ group: { archivedAt: new Date() } });
+    await expect(lock(tx)).rejects.toMatchObject({ code: 'BAD_REQUEST', messageKey: 'archivedEditExpense' });
+  });
+
+  test('one outside any group is judged by its expense alone', async () => {
+    const tx = db({ receipt: [{ groupId: null }] });
+    await expect(lock(tx)).resolves.toBeUndefined();
+    expect(tx.group.findUnique).not.toHaveBeenCalled();
+  });
+
+  test('a receipt that is gone is NOT_FOUND', async () => {
+    await expect(lock(db({ receipt: [] }))).rejects.toMatchObject({ code: 'NOT_FOUND' });
   });
 });

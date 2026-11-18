@@ -136,7 +136,8 @@
     "validationNameRequired": "请输入项目名称。",
     "validationPricePositive": "价格必须大于零。",
     "validationQtyPositive": "数量必须是正整数。",
-    "receiptImageAlt": "收据"
+    "receiptImageAlt": "收据",
+    "locked": "此收据已用于一笔支出，或其群组已归档，因此无法在此更改。要更正分摊，请编辑该支出。"
   },
   "splits": {
     "selectAll": "全选",

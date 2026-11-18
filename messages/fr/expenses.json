@@ -136,7 +136,8 @@
     "validationNameRequired": "Le nom de l'article est requis.",
     "validationPricePositive": "Le prix doit être supérieur à zéro.",
     "validationQtyPositive": "La quantité doit être un nombre entier positif.",
-    "receiptImageAlt": "Reçu"
+    "receiptImageAlt": "Reçu",
+    "locked": "Ce reçu a déjà servi à une dépense, ou son groupe est archivé : il ne peut plus être modifié ici. Pour corriger la répartition, modifiez la dépense."
   },
   "splits": {
     "selectAll": "Tout sélectionner",

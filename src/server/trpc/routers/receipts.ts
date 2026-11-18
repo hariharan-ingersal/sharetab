@@ -3,7 +3,7 @@ import { AppError } from '@/server/lib/app-error';
 import { Prisma } from '@/generated/prisma/client';
 import type { PrismaClient } from '@/generated/prisma/client';
 import { createTRPCRouter, protectedProcedure, groupMemberProcedure } from '../init';
-import { processReceiptImage } from '../../lib/receipt-processor';
+import { lockEditableReceipt, processReceiptImage } from '../../lib/receipt-processor';
 import { logger } from '../../lib/logger';
 import { parseExtractedData, receiptCurrency } from '../../lib/json-schemas';
 import { DEFAULT_CURRENCY } from '@/lib/currencies';
@@ -135,17 +135,27 @@ export const receiptsRouter = createTRPCRouter({
       // in: deleting it from the pending list takes it off the group and keeps it while a
       // claim session uses it (#318), and this update, queued behind that delete's row lock,
       // would otherwise put it back
-      const claimed = await ctx.db.receipt.updateMany({
-        where: {
-          id: input.receiptId,
-          groupId: receipt.groupId,
-          OR: [{ status: { not: 'PROCESSING' } }, { updatedAt: { lt: new Date(Date.now() - 15 * 60 * 1000) } }],
-        },
-        data: {
-          status: 'PROCESSING',
-          ...(input.groupId ? { groupId: input.groupId, savedById: ctx.user.id } : {}),
-        },
-      });
+      // A receipt an expense was made from (or whose group is archived) isn't scanned again: the
+      // scan would replace its items
+      const claimed = await ctx.db
+        .$transaction(async (tx) => {
+          await lockEditableReceipt(tx, input.receiptId);
+          return tx.receipt.updateMany({
+            where: {
+              id: input.receiptId,
+              groupId: receipt.groupId,
+              OR: [{ status: { not: 'PROCESSING' } }, { updatedAt: { lt: new Date(Date.now() - 15 * 60 * 1000) } }],
+            },
+            data: {
+              status: 'PROCESSING',
+              ...(input.groupId ? { groupId: input.groupId, savedById: ctx.user.id } : {}),
+            },
+          });
+        })
+        .catch((error: unknown) => {
+          refundScan();
+          throw error;
+        });
       if (claimed.count === 0) {
         refundScan();
         const now = await ctx.db.receipt.findUnique({ where: { id: input.receiptId }, select: { groupId: true } });
@@ -165,6 +175,11 @@ export const receiptsRouter = createTRPCRouter({
           logPrefix: 'receipt',
         });
       } catch (error) {
+        // An expense was made from the receipt while it was being scanned: the scan's result is
+        // dropped and the receipt stays as the expense left it, not FAILED
+        if (error instanceof AppError) {
+          throw error;
+        }
         logger.error('receipt.failed', {
           receiptId: input.receiptId,
           error: error instanceof Error ? error.message : 'Unknown',
@@ -204,11 +219,17 @@ export const receiptsRouter = createTRPCRouter({
     };
 
     const receiptWithItems = receipt as typeof receipt & { items: ReceiptItem[] };
+    // The receipt page shows a receipt an expense was made from (or one in an archived group)
+    // read-only: the server refuses changes to it (lockEditableReceipt)
+    const locked =
+      !!receipt.group?.archivedAt ||
+      (await ctx.db.expense.findUnique({ where: { receiptId: input.receiptId }, select: { id: true } })) !== null;
 
     return {
       receipt: {
         id: receiptWithItems.id,
         status: receiptWithItems.status,
+        locked,
         imagePath: receiptWithItems.imagePath,
         paidById: receiptWithItems.paidById,
         // What Save for later kept (#412)
@@ -238,9 +259,12 @@ export const receiptsRouter = createTRPCRouter({
       await verifyReceiptAccess(ctx.db, item.receiptId, ctx.user.id);
 
       const { itemId, ...data } = input;
-      return ctx.db.receiptItem.update({
-        where: { id: itemId },
-        data: stripUndefined(data),
+      return ctx.db.$transaction(async (tx) => {
+        await lockEditableReceipt(tx, item.receiptId);
+        return tx.receiptItem.update({
+          where: { id: itemId },
+          data: stripUndefined(data),
+        });
       });
     }),
 
@@ -257,20 +281,23 @@ export const receiptsRouter = createTRPCRouter({
     .mutation(async ({ ctx, input }) => {
       await verifyReceiptAccess(ctx.db, input.receiptId, ctx.user.id);
 
-      const maxSort = await ctx.db.receiptItem.findFirst({
-        where: { receiptId: input.receiptId },
-        orderBy: { sortOrder: 'desc' },
-        select: { sortOrder: true },
-      });
-      return ctx.db.receiptItem.create({
-        data: {
-          receiptId: input.receiptId,
-          name: input.name,
-          quantity: input.quantity,
-          unitPrice: input.unitPrice,
-          totalPrice: input.totalPrice,
-          sortOrder: (maxSort?.sortOrder ?? 0) + 1,
-        },
+      return ctx.db.$transaction(async (tx) => {
+        await lockEditableReceipt(tx, input.receiptId);
+        const maxSort = await tx.receiptItem.findFirst({
+          where: { receiptId: input.receiptId },
+          orderBy: { sortOrder: 'desc' },
+          select: { sortOrder: true },
+        });
+        return tx.receiptItem.create({
+          data: {
+            receiptId: input.receiptId,
+            name: input.name,
+            quantity: input.quantity,
+            unitPrice: input.unitPrice,
+            totalPrice: input.totalPrice,
+            sortOrder: (maxSort?.sortOrder ?? 0) + 1,
+          },
+        });
       });
     }),
 
@@ -281,10 +308,14 @@ export const receiptsRouter = createTRPCRouter({
     if (!item) throw new AppError('NOT_FOUND');
     await verifyReceiptAccess(ctx.db, item.receiptId, ctx.user.id);
 
-    await ctx.db.receiptItemAssignment.deleteMany({
-      where: { receiptItemId: input.itemId },
+    // Its assignments go with it, and they record how an expense made from the receipt was split
+    await ctx.db.$transaction(async (tx) => {
+      await lockEditableReceipt(tx, item.receiptId);
+      await tx.receiptItemAssignment.deleteMany({
+        where: { receiptItemId: input.itemId },
+      });
+      await tx.receiptItem.delete({ where: { id: input.itemId } });
     });
-    await ctx.db.receiptItem.delete({ where: { id: input.itemId } });
     return { success: true };
   }),
 
@@ -307,6 +338,7 @@ export const receiptsRouter = createTRPCRouter({
       }
 
       return ctx.db.$transaction(async (tx) => {
+        await lockEditableReceipt(tx, item.receiptId);
         const current = await tx.receiptItem.findUniqueOrThrow({
           where: { id: input.itemId },
         });
@@ -366,18 +398,26 @@ export const receiptsRouter = createTRPCRouter({
       }),
     )
     .mutation(async ({ ctx, input }) => {
-      const receipt = await verifyReceiptAccess(ctx.db, input.receiptId, ctx.user.id);
+      await verifyReceiptAccess(ctx.db, input.receiptId, ctx.user.id);
 
-      const current = (receipt.extractedData ?? {}) as Record<string, unknown>;
-      const updated = {
-        ...current,
-        ...(input.tax !== undefined ? { tax: input.tax } : {}),
-        ...(input.tip !== undefined ? { tip: input.tip } : {}),
-      };
+      await ctx.db.$transaction(async (tx) => {
+        await lockEditableReceipt(tx, input.receiptId);
+        // Read under the lock, so a change made meanwhile (the currency, say) isn't overwritten
+        const receipt = await tx.receipt.findUniqueOrThrow({
+          where: { id: input.receiptId },
+          select: { extractedData: true },
+        });
+        const current = (receipt.extractedData ?? {}) as Record<string, unknown>;
+        const updated = {
+          ...current,
+          ...(input.tax !== undefined ? { tax: input.tax } : {}),
+          ...(input.tip !== undefined ? { tip: input.tip } : {}),
+        };
 
-      await ctx.db.receipt.update({
-        where: { id: input.receiptId },
-        data: { extractedData: updated as unknown as Prisma.InputJsonValue },
+        await tx.receipt.update({
+          where: { id: input.receiptId },
+          data: { extractedData: updated as unknown as Prisma.InputJsonValue },
+        });
       });
       return { success: true };
     }),
@@ -394,14 +434,11 @@ export const receiptsRouter = createTRPCRouter({
         // under it, so either this waits for that expense (and is refused below) or that expense
         // sees the change. A scan starting again marks it PROCESSING under the same lock, so either
         // this is refused below or the scan waits and then saves its own read of the currency
-        await tx.$queryRaw`SELECT 1 FROM "Receipt" WHERE "id" = ${input.receiptId} FOR NO KEY UPDATE`;
+        // The lock, and the refusal once an expense was made from it or its group is archived
+        await lockEditableReceipt(tx, input.receiptId);
         const receipt = await verifyReceiptAccess(tx, input.receiptId, ctx.user.id);
         if (receipt.status !== 'COMPLETED') {
           throw new AppError('BAD_REQUEST', 'receiptNotProcessed');
-        }
-        const existing = await tx.expense.findUnique({ where: { receiptId: input.receiptId } });
-        if (existing) {
-          throw new AppError('BAD_REQUEST', 'receiptAlreadyHasExpense');
         }
         const extractedData = (receipt.extractedData ?? {}) as Record<string, unknown>;
         await tx.receipt.update({
@@ -425,13 +462,22 @@ export const receiptsRouter = createTRPCRouter({
     // rejects concurrent reprocessing of the same receipt. A PROCESSING
     // receipt untouched for 15+ minutes is stale and may be re-claimed
     // (threshold exceeds the worst-case provider pipeline duration).
-    const claimed = await ctx.db.receipt.updateMany({
-      where: {
-        id: input.receiptId,
-        OR: [{ status: { not: 'PROCESSING' } }, { updatedAt: { lt: new Date(Date.now() - 15 * 60 * 1000) } }],
-      },
-      data: { status: 'PROCESSING' },
-    });
+    const claimed = await ctx.db
+      .$transaction(async (tx) => {
+        // Not one an expense was made from, or whose group is archived (see processReceipt)
+        await lockEditableReceipt(tx, input.receiptId);
+        return tx.receipt.updateMany({
+          where: {
+            id: input.receiptId,
+            OR: [{ status: { not: 'PROCESSING' } }, { updatedAt: { lt: new Date(Date.now() - 15 * 60 * 1000) } }],
+          },
+          data: { status: 'PROCESSING' },
+        });
+      })
+      .catch((error: unknown) => {
+        refundScan();
+        throw error;
+      });
     if (claimed.count === 0) {
       refundScan();
       throw new AppError('CONFLICT', 'receiptBeingProcessed');
@@ -446,6 +492,10 @@ export const receiptsRouter = createTRPCRouter({
         logPrefix: 'receipt.retry',
       });
     } catch (error) {
+      // See processReceipt: a receipt an expense was made from meanwhile isn't marked FAILED
+      if (error instanceof AppError) {
+        throw error;
+      }
       await ctx.db.receipt.update({
         where: { id: input.receiptId },
         data: {
