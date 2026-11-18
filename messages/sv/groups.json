@@ -127,6 +127,7 @@
     "amount": "Belopp",
     "submit": "Registrera betalning",
     "submitting": "Bokför...",
+    "unconfirmed": "Vi kunde inte bekräfta att betalningen registrerades. Försök igen – den registreras inte två gånger.",
     "description": "Registrera en betalning mellan två gruppmedlemmar.",
     "selectMember": "Välj medlem",
     "useSuggested": "Använd föreslaget: {amount}",

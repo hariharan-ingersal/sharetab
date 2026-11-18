@@ -27,8 +27,8 @@ const READS: Record<string, { count: number; why: string }> = {
   },
   'src/server/trpc/routers/receipts.ts': { count: 4, why: 'counts them: a deleted expense keeps its receipt' },
   'src/server/trpc/routers/settlements.ts': {
-    count: 4,
-    why: 'list skips them (or lists only them); delete and restore check deletedAt',
+    count: 5,
+    why: 'list skips them (or lists only them); delete and restore check deletedAt; create looks a payment up by its attempt key whether or not it was deleted since, since a retry of that attempt must not record it again',
   },
 };
 

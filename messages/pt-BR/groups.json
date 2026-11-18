@@ -127,6 +127,7 @@
     "amount": "Valor",
     "submit": "Registrar pagamento",
     "submitting": "Registrando...",
+    "unconfirmed": "Não foi possível confirmar que o pagamento foi registrado. Tente novamente — ele não será registrado duas vezes.",
     "description": "Registre um pagamento entre dois membros do grupo.",
     "selectMember": "Selecionar membro",
     "useSuggested": "Usar sugerido: {amount}",
