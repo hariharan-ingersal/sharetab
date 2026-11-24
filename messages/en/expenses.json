@@ -136,7 +136,8 @@
     "validationNameRequired": "Item name is required.",
     "validationPricePositive": "Price must be greater than zero.",
     "validationQtyPositive": "Quantity must be a positive whole number.",
-    "receiptImageAlt": "Receipt"
+    "receiptImageAlt": "Receipt",
+    "locked": "This receipt has been used for an expense, or its group is archived, so it can’t be changed here. To correct the split, edit the expense."
   },
   "splits": {
     "selectAll": "Select all",

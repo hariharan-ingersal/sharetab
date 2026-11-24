@@ -4,6 +4,33 @@ import type { AIProvider } from '../ai/provider';
 import { getAIProvidersWithFallback, clearProviderCache } from '../ai/registry';
 import { logger } from './logger';
 import { normalizeDate } from './normalize-date';
+import { AppError } from './app-error';
+
+/**
+ * Lock a receipt's row for a change to its items, amounts or details, and refuse the change once
+ * an expense has been made from it, or its group is archived. The expense is the receipt's record
+ * of how the bill was split: a deleted one counts too, since restoring brings it back as it was,
+ * and an expense is corrected by editing the expense. The lock is the one an expense being made
+ * from the receipt takes (FOR SHARE), so a change either lands before that expense, whose page then
+ * refuses the split it showed, or waits for it and is refused here. Call it first in the
+ * transaction that makes the change.
+ */
+export async function lockEditableReceipt(tx: Prisma.TransactionClient, receiptId: string): Promise<void> {
+  const [receipt] = await tx.$queryRaw<{ groupId: string | null }[]>`
+    SELECT "groupId" FROM "Receipt" WHERE "id" = ${receiptId} FOR NO KEY UPDATE`;
+  if (!receipt) {
+    throw new AppError('NOT_FOUND', 'receiptNotFound');
+  }
+  if (await tx.expense.findUnique({ where: { receiptId }, select: { id: true } })) {
+    throw new AppError('BAD_REQUEST', 'receiptAlreadyHasExpense');
+  }
+  if (receipt.groupId) {
+    const group = await tx.group.findUnique({ where: { id: receipt.groupId }, select: { archivedAt: true } });
+    if (group?.archivedAt) {
+      throw new AppError('BAD_REQUEST', 'archivedEditExpense');
+    }
+  }
+}
 
 interface ProcessReceiptImageOptions {
   db: PrismaClient;
@@ -94,6 +121,10 @@ export async function processReceiptImage({
   // concurrent reprocess must never leave a COMPLETED receipt with missing
   // or duplicated items.
   await db.$transaction(async (tx) => {
+    // A scan can outlive its claim (one stale after 15 minutes is claimed again, and that scan can
+    // complete and the receipt become an expense): it never replaces the items of a receipt that
+    // an expense was made from in the meantime
+    await lockEditableReceipt(tx, receiptId);
     await tx.receiptItem.deleteMany({ where: { receiptId } });
 
     await tx.receiptItem.createMany({

@@ -317,6 +317,10 @@ model Settlement {
   exchangeRate        Float   @default(1.0) // rate: 1 unit of settlement currency = X units of group currency
   baseCurrencyAmount  Int?    // amount converted to group currency (cents); null = same currency
   note     String?
+  // The id the payer's form made for this attempt to record a payment: a retry of an attempt whose
+  // answer was lost (or a second click) sends the same one, and gets this payment back instead of
+  // recording another. Null for payments recorded without one (before it existed, or by API callers)
+  requestKey String? @unique
   // Set when the payment is deleted (#327), as on Expense
   deletedAt   DateTime?
   deletedById String?

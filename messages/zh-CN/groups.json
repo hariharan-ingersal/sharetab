@@ -127,6 +127,7 @@
     "amount": "金额",
     "submit": "记录付款",
     "submitting": "记录中...",
+    "unconfirmed": "无法确认付款是否已记录。请重试——不会重复记录。",
     "description": "记录两位群组成员之间的付款。",
     "selectMember": "选择成员",
     "useSuggested": "使用建议金额：{amount}",

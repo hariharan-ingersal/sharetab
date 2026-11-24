@@ -127,6 +127,7 @@
     "amount": "금액",
     "submit": "결제 기록",
     "submitting": "기록 중...",
+    "unconfirmed": "결제가 기록되었는지 확인하지 못했습니다. 다시 시도해 주세요. 두 번 기록되지 않습니다.",
     "description": "두 그룹 멤버 간의 결제를 기록합니다.",
     "selectMember": "멤버 선택",
     "useSuggested": "제안 금액 사용: {amount}",

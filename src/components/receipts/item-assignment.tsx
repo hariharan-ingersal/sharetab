@@ -566,417 +566,431 @@ export function ItemAssignment({
         </CardContent>
       </Card>
 
-      {/* Expense details */}
-      <Card>
-        <CardContent className="space-y-3 pt-4">
-          <div className="space-y-2">
-            <Label htmlFor="title">{t('expenseTitle')}</Label>
-            <Input
-              id="title"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder={t('expenseTitlePlaceholder')}
-              required
-            />
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="paidBy">{t('paidBy')}</Label>
-            <select
-              id="paidBy"
-              value={effectivePaidById}
-              onChange={(e) => setPaidById(e.target.value)}
-              required
-              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm"
-              data-testid="paid-by-select"
-            >
-              <option value="">{t('selectMember')}</option>
-              {members.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name ?? t('unnamed')}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="receipt-currency">{tNew('currency')}</Label>
-            <select
-              id="receipt-currency"
-              value={currency}
-              onChange={(e) => setCurrency.mutate({ receiptId, currency: e.target.value })}
-              disabled={setCurrency.isPending}
-              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm"
-              data-testid="receipt-currency-select"
-            >
-              {currencyOptions.map((code) => (
-                <option key={code} value={code}>
-                  {code}
-                </option>
-              ))}
-            </select>
-          </div>
-          {isDifferentCurrency && (
-            <div
-              className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm dark:border-blue-800 dark:bg-blue-950/50"
-              data-testid="receipt-rate"
-            >
-              <p className="text-blue-800 dark:text-blue-200">
-                {tNew('differentCurrencyNote', { expenseCurrency: currency, groupCurrency })}
-              </p>
-              <label className="mt-2 flex items-center gap-1.5 text-xs text-blue-700 dark:text-blue-300">
-                <input
-                  type="checkbox"
-                  checked={useManualRate}
-                  onChange={(e) => setUseManualRate(e.target.checked)}
-                  className="rounded"
-                />
-                {tNew('manualRateOverride')}
-              </label>
-              {useManualRate ? (
-                <div className="mt-2">
-                  <Input
-                    type="number"
-                    step="any"
-                    min="0.000001"
-                    aria-label={tNew('exchangeRatePlaceholder', { from: currency, to: groupCurrency })}
-                    placeholder={tNew('exchangeRatePlaceholder', { from: currency, to: groupCurrency })}
-                    value={manualRateText}
-                    onChange={(e) => setManualRate({ currency, text: e.target.value })}
-                    data-testid="receipt-rate-input"
-                  />
-                  {manualRateValid && expenseTotal > 0 && (
-                    <p className="mt-1 text-xs text-blue-700 dark:text-blue-300">
-                      {tNew('convertedAmount', {
-                        amount: formatCents(
-                          convertAmount(expenseTotal, parsedManualRate, groupCurrency),
-                          groupCurrency,
-                          locale,
-                        ),
-                      })}
-                    </p>
-                  )}
-                </div>
-              ) : (
-                <p className="mt-1 text-xs text-blue-600 dark:text-blue-400">{tNew('autoRateNote')}</p>
-              )}
+      {/* A receipt an expense was made from, or one in an archived group, is shown read-only: the
+          server refuses changes to it, and the expense is what gets corrected */}
+      {safeReceipt.locked && (
+        <p className="rounded-md bg-muted p-3 text-sm text-muted-foreground" data-testid="receipt-locked">
+          {t('locked')}
+        </p>
+      )}
+      <fieldset disabled={safeReceipt.locked} className="min-w-0 space-y-4">
+        {/* Expense details */}
+        <Card>
+          <CardContent className="space-y-3 pt-4">
+            <div className="space-y-2">
+              <Label htmlFor="title">{t('expenseTitle')}</Label>
+              <Input
+                id="title"
+                value={title}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder={t('expenseTitlePlaceholder')}
+                required
+              />
             </div>
-          )}
-          <div className="space-y-2">
-            <Label htmlFor="tip">{t('tipOverride')}</Label>
-            <Input
-              id="tip"
-              type="number"
-              step={amountInputStep(currency)}
-              min="0"
-              placeholder={t('tipDetected', { amount: formatCents(safeExtracted.tip, currency, locale) })}
-              value={tipOverride}
-              onChange={(e) => setTipOverride(e.target.value)}
-            />
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Quick actions */}
-      <div className="flex gap-2">
-        <Button type="button" variant="outline" size="sm" onClick={assignAllToEveryone} data-testid="split-all-btn">
-          <Users className="mr-2 h-4 w-4" />
-          {t('splitAllEqually')}
-        </Button>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={() => setAddingItem(true)}
-          data-testid="add-item-btn"
-        >
-          <Plus className="mr-2 h-4 w-4" />
-          {t('addItem')}
-        </Button>
-      </div>
-
-      {/* Add new item form */}
-      {addingItem && (
-        <Card className="border-primary/50" data-testid="add-item-form">
-          <CardContent className="py-3">
-            <div
-              className="space-y-2"
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && (e.target as HTMLElement).tagName === 'INPUT' && !addItem.isPending) {
-                  e.preventDefault();
-                  handleAddItem();
-                }
-              }}
-            >
-              <div className="flex gap-2">
-                <Input
-                  placeholder={t('itemNamePlaceholder')}
-                  value={newItem.name}
-                  onChange={(e) => setNewItem((p) => ({ ...p, name: e.target.value }))}
-                  className="flex-1"
-                />
-                <Input
-                  type="number"
-                  placeholder={t('qtyPlaceholder')}
-                  value={newItem.quantity}
-                  onChange={(e) => setNewItem((p) => ({ ...p, quantity: e.target.value }))}
-                  className="w-16"
-                  min="1"
-                />
-                <Input
-                  type="number"
-                  step={amountInputStep(currency)}
-                  placeholder={t('pricePlaceholder')}
-                  value={newItem.totalPrice}
-                  onChange={(e) => setNewItem((p) => ({ ...p, totalPrice: e.target.value }))}
-                  className="w-24"
-                />
+            <div className="space-y-2">
+              <Label htmlFor="paidBy">{t('paidBy')}</Label>
+              <select
+                id="paidBy"
+                value={effectivePaidById}
+                onChange={(e) => setPaidById(e.target.value)}
+                required
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm"
+                data-testid="paid-by-select"
+              >
+                <option value="">{t('selectMember')}</option>
+                {members.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name ?? t('unnamed')}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="receipt-currency">{tNew('currency')}</Label>
+              <select
+                id="receipt-currency"
+                value={currency}
+                onChange={(e) => setCurrency.mutate({ receiptId, currency: e.target.value })}
+                disabled={setCurrency.isPending}
+                className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm"
+                data-testid="receipt-currency-select"
+              >
+                {currencyOptions.map((code) => (
+                  <option key={code} value={code}>
+                    {code}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {isDifferentCurrency && (
+              <div
+                className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm dark:border-blue-800 dark:bg-blue-950/50"
+                data-testid="receipt-rate"
+              >
+                <p className="text-blue-800 dark:text-blue-200">
+                  {tNew('differentCurrencyNote', { expenseCurrency: currency, groupCurrency })}
+                </p>
+                <label className="mt-2 flex items-center gap-1.5 text-xs text-blue-700 dark:text-blue-300">
+                  <input
+                    type="checkbox"
+                    checked={useManualRate}
+                    onChange={(e) => setUseManualRate(e.target.checked)}
+                    className="rounded"
+                  />
+                  {tNew('manualRateOverride')}
+                </label>
+                {useManualRate ? (
+                  <div className="mt-2">
+                    <Input
+                      type="number"
+                      step="any"
+                      min="0.000001"
+                      aria-label={tNew('exchangeRatePlaceholder', { from: currency, to: groupCurrency })}
+                      placeholder={tNew('exchangeRatePlaceholder', { from: currency, to: groupCurrency })}
+                      value={manualRateText}
+                      onChange={(e) => setManualRate({ currency, text: e.target.value })}
+                      data-testid="receipt-rate-input"
+                    />
+                    {manualRateValid && expenseTotal > 0 && (
+                      <p className="mt-1 text-xs text-blue-700 dark:text-blue-300">
+                        {tNew('convertedAmount', {
+                          amount: formatCents(
+                            convertAmount(expenseTotal, parsedManualRate, groupCurrency),
+                            groupCurrency,
+                            locale,
+                          ),
+                        })}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="mt-1 text-xs text-blue-600 dark:text-blue-400">{tNew('autoRateNote')}</p>
+                )}
               </div>
-              <div className="flex gap-2">
-                <Button type="button" size="sm" disabled={addItem.isPending} onClick={handleAddItem}>
-                  {addItem.isPending ? t('adding') : t('add')}
-                </Button>
-                <Button type="button" variant="ghost" size="sm" onClick={() => setAddingItem(false)}>
-                  {t('cancel')}
-                </Button>
-              </div>
+            )}
+            <div className="space-y-2">
+              <Label htmlFor="tip">{t('tipOverride')}</Label>
+              <Input
+                id="tip"
+                type="number"
+                step={amountInputStep(currency)}
+                min="0"
+                placeholder={t('tipDetected', { amount: formatCents(safeExtracted.tip, currency, locale) })}
+                value={tipOverride}
+                onChange={(e) => setTipOverride(e.target.value)}
+              />
             </div>
           </CardContent>
         </Card>
-      )}
 
-      {/* Item assignment */}
-      <div className="space-y-2">
-        <Label>{t('assignItems', { assigned: assignedItemCount, total: items.length })}</Label>
-        {items.map((item) => {
-          const assigned = assignments[item.id] ?? new Set();
-          const isEditing = editingItem === item.id;
+        {/* Quick actions */}
+        <div className="flex gap-2">
+          <Button type="button" variant="outline" size="sm" onClick={assignAllToEveryone} data-testid="split-all-btn">
+            <Users className="mr-2 h-4 w-4" />
+            {t('splitAllEqually')}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setAddingItem(true)}
+            data-testid="add-item-btn"
+          >
+            <Plus className="mr-2 h-4 w-4" />
+            {t('addItem')}
+          </Button>
+        </div>
 
-          return (
-            <Card
-              key={item.id}
-              className={assigned.size === 0 ? 'border-amber-300' : ''}
-              data-testid={`item-card-${item.id}`}
-            >
-              <CardContent className="py-3">
-                {isEditing ? (
-                  <div className="mb-2 space-y-2">
-                    <div className="flex gap-2">
-                      <Input
-                        value={editValues.name}
-                        onChange={(e) => setEditValues((p) => ({ ...p, name: e.target.value }))}
-                        className="flex-1"
-                        placeholder={t('itemNamePlaceholder')}
-                      />
-                      <Input
-                        type="number"
-                        value={editValues.quantity}
-                        onChange={(e) => setEditValues((p) => ({ ...p, quantity: e.target.value }))}
-                        className="w-16"
-                        placeholder={t('qtyPlaceholder')}
-                        min="1"
-                      />
-                      <Input
-                        type="number"
-                        step={amountInputStep(currency)}
-                        value={editValues.totalPrice}
-                        onChange={(e) => setEditValues((p) => ({ ...p, totalPrice: e.target.value }))}
-                        className="w-24"
-                        placeholder={t('pricePlaceholder')}
-                      />
-                    </div>
-                    <div className="flex gap-1">
-                      <Button type="button" size="sm" onClick={() => saveEdit(item.id)} disabled={updateItem.isPending}>
-                        {t('save')}
-                      </Button>
-                      <Button type="button" variant="ghost" size="sm" onClick={() => setEditingItem(null)}>
-                        {t('cancel')}
-                      </Button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="mb-2 flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{item.name}</span>
-                      {item.quantity > 1 && <span className="text-xs text-muted-foreground">x{item.quantity}</span>}
-                      <button
-                        type="button"
-                        onClick={() => startEditing(item)}
-                        className="text-muted-foreground hover:text-foreground"
-                        aria-label={t('editItem', { name: item.name })}
-                        title={t('editItem', { name: item.name })}
-                      >
-                        <Pencil className="h-3 w-3" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setRemoveItem({ id: item.id, name: item.name })}
-                        className="text-muted-foreground hover:text-destructive"
-                        aria-label={t('removeItem', { name: item.name })}
-                        title={t('removeItem', { name: item.name })}
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </button>
-                      {item.quantity > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSplittingItem(item.id);
-                            setSplitQuantity('1');
-                          }}
-                          className="text-muted-foreground hover:text-foreground"
-                          title={t('split')}
-                          aria-label={t('splitAriaLabel', { name: item.name })}
-                          data-testid={`split-btn-${item.id}`}
-                        >
-                          <Scissors className="h-3 w-3" />
-                        </button>
-                      )}
-                    </div>
-                    <span className="font-semibold">{formatCents(item.totalPrice, currency, locale)}</span>
-                  </div>
-                )}
-                {!isEditing &&
-                  splittingItem === item.id &&
-                  (() => {
-                    const parsed = Number(splitQuantity);
-                    const validQty = Number.isSafeInteger(parsed) && parsed >= 1 && parsed < item.quantity;
-                    return (
-                      <div className="mb-2 flex items-center gap-2" data-testid="split-form">
-                        <span className="text-xs text-muted-foreground">{t('splitOff')}</span>
+        {/* Add new item form */}
+        {addingItem && (
+          <Card className="border-primary/50" data-testid="add-item-form">
+            <CardContent className="py-3">
+              <div
+                className="space-y-2"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && (e.target as HTMLElement).tagName === 'INPUT' && !addItem.isPending) {
+                    e.preventDefault();
+                    handleAddItem();
+                  }
+                }}
+              >
+                <div className="flex gap-2">
+                  <Input
+                    placeholder={t('itemNamePlaceholder')}
+                    value={newItem.name}
+                    onChange={(e) => setNewItem((p) => ({ ...p, name: e.target.value }))}
+                    className="flex-1"
+                  />
+                  <Input
+                    type="number"
+                    placeholder={t('qtyPlaceholder')}
+                    value={newItem.quantity}
+                    onChange={(e) => setNewItem((p) => ({ ...p, quantity: e.target.value }))}
+                    className="w-16"
+                    min="1"
+                  />
+                  <Input
+                    type="number"
+                    step={amountInputStep(currency)}
+                    placeholder={t('pricePlaceholder')}
+                    value={newItem.totalPrice}
+                    onChange={(e) => setNewItem((p) => ({ ...p, totalPrice: e.target.value }))}
+                    className="w-24"
+                  />
+                </div>
+                <div className="flex gap-2">
+                  <Button type="button" size="sm" disabled={addItem.isPending} onClick={handleAddItem}>
+                    {addItem.isPending ? t('adding') : t('add')}
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" onClick={() => setAddingItem(false)}>
+                    {t('cancel')}
+                  </Button>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Item assignment */}
+        <div className="space-y-2">
+          <Label>{t('assignItems', { assigned: assignedItemCount, total: items.length })}</Label>
+          {items.map((item) => {
+            const assigned = assignments[item.id] ?? new Set();
+            const isEditing = editingItem === item.id;
+
+            return (
+              <Card
+                key={item.id}
+                className={assigned.size === 0 ? 'border-amber-300' : ''}
+                data-testid={`item-card-${item.id}`}
+              >
+                <CardContent className="py-3">
+                  {isEditing ? (
+                    <div className="mb-2 space-y-2">
+                      <div className="flex gap-2">
+                        <Input
+                          value={editValues.name}
+                          onChange={(e) => setEditValues((p) => ({ ...p, name: e.target.value }))}
+                          className="flex-1"
+                          placeholder={t('itemNamePlaceholder')}
+                        />
                         <Input
                           type="number"
-                          min={1}
-                          max={item.quantity - 1}
-                          value={splitQuantity}
-                          onChange={(e) => setSplitQuantity(e.target.value)}
-                          className="w-16 h-7 text-xs"
-                          data-testid="split-qty-input"
+                          value={editValues.quantity}
+                          onChange={(e) => setEditValues((p) => ({ ...p, quantity: e.target.value }))}
+                          className="w-16"
+                          placeholder={t('qtyPlaceholder')}
+                          min="1"
                         />
-                        <span className="text-xs text-muted-foreground">
-                          {t('splitOfTotal', { total: item.quantity })}
-                        </span>
+                        <Input
+                          type="number"
+                          step={amountInputStep(currency)}
+                          value={editValues.totalPrice}
+                          onChange={(e) => setEditValues((p) => ({ ...p, totalPrice: e.target.value }))}
+                          className="w-24"
+                          placeholder={t('pricePlaceholder')}
+                        />
+                      </div>
+                      <div className="flex gap-1">
                         <Button
                           type="button"
                           size="sm"
-                          className="h-7 text-xs"
-                          disabled={splitItem.isPending || !validQty}
-                          data-testid="split-submit"
-                          onClick={() => {
-                            if (!validQty) return;
-                            splitItem.mutate({ itemId: item.id, splitQuantity: parsed });
-                            setSplittingItem(null);
-                          }}
+                          onClick={() => saveEdit(item.id)}
+                          disabled={updateItem.isPending}
                         >
-                          {t('split')}
+                          {t('save')}
                         </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 text-xs"
-                          onClick={() => setSplittingItem(null)}
-                        >
+                        <Button type="button" variant="ghost" size="sm" onClick={() => setEditingItem(null)}>
                           {t('cancel')}
                         </Button>
                       </div>
-                    );
-                  })()}
-                <div className="flex flex-wrap gap-1.5">
-                  {members.map((m) => {
-                    const isAssigned = assigned.has(m.id);
-                    return (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => toggleAssignment(item.id, m.id)}
-                        data-testid={`member-toggle-${m.id}`}
-                        className={`flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-xs transition-colors ${
-                          isAssigned
-                            ? 'bg-primary text-primary-foreground'
-                            : 'bg-muted text-muted-foreground hover:bg-muted/80'
-                        }`}
-                      >
-                        <Avatar className="h-4 w-4">
-                          <AvatarFallback className="text-[8px]">{memberInitials.get(m.id) ?? '?'}</AvatarFallback>
-                        </Avatar>
-                        <span
-                          data-testid="chip-label"
-                          className="min-w-0 text-left [overflow-wrap:anywhere]"
-                          title={m.name ?? undefined}
+                    </div>
+                  ) : (
+                    <div className="mb-2 flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">{item.name}</span>
+                        {item.quantity > 1 && <span className="text-xs text-muted-foreground">x{item.quantity}</span>}
+                        <button
+                          type="button"
+                          onClick={() => startEditing(item)}
+                          className="text-muted-foreground hover:text-foreground"
+                          aria-label={t('editItem', { name: item.name })}
+                          title={t('editItem', { name: item.name })}
                         >
-                          {memberLabels.get(m.id) ?? '?'}
-                        </span>
-                        {isAssigned && <Check className="h-3 w-3" />}
-                      </button>
-                    );
-                  })}
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
-      </div>
+                          <Pencil className="h-3 w-3" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setRemoveItem({ id: item.id, name: item.name })}
+                          className="text-muted-foreground hover:text-destructive"
+                          aria-label={t('removeItem', { name: item.name })}
+                          title={t('removeItem', { name: item.name })}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                        {item.quantity > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSplittingItem(item.id);
+                              setSplitQuantity('1');
+                            }}
+                            className="text-muted-foreground hover:text-foreground"
+                            title={t('split')}
+                            aria-label={t('splitAriaLabel', { name: item.name })}
+                            data-testid={`split-btn-${item.id}`}
+                          >
+                            <Scissors className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
+                      <span className="font-semibold">{formatCents(item.totalPrice, currency, locale)}</span>
+                    </div>
+                  )}
+                  {!isEditing &&
+                    splittingItem === item.id &&
+                    (() => {
+                      const parsed = Number(splitQuantity);
+                      const validQty = Number.isSafeInteger(parsed) && parsed >= 1 && parsed < item.quantity;
+                      return (
+                        <div className="mb-2 flex items-center gap-2" data-testid="split-form">
+                          <span className="text-xs text-muted-foreground">{t('splitOff')}</span>
+                          <Input
+                            type="number"
+                            min={1}
+                            max={item.quantity - 1}
+                            value={splitQuantity}
+                            onChange={(e) => setSplitQuantity(e.target.value)}
+                            className="w-16 h-7 text-xs"
+                            data-testid="split-qty-input"
+                          />
+                          <span className="text-xs text-muted-foreground">
+                            {t('splitOfTotal', { total: item.quantity })}
+                          </span>
+                          <Button
+                            type="button"
+                            size="sm"
+                            className="h-7 text-xs"
+                            disabled={splitItem.isPending || !validQty}
+                            data-testid="split-submit"
+                            onClick={() => {
+                              if (!validQty) return;
+                              splitItem.mutate({ itemId: item.id, splitQuantity: parsed });
+                              setSplittingItem(null);
+                            }}
+                          >
+                            {t('split')}
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={() => setSplittingItem(null)}
+                          >
+                            {t('cancel')}
+                          </Button>
+                        </div>
+                      );
+                    })()}
+                  <div className="flex flex-wrap gap-1.5">
+                    {members.map((m) => {
+                      const isAssigned = assigned.has(m.id);
+                      return (
+                        <button
+                          key={m.id}
+                          type="button"
+                          onClick={() => toggleAssignment(item.id, m.id)}
+                          data-testid={`member-toggle-${m.id}`}
+                          className={`flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-xs transition-colors ${
+                            isAssigned
+                              ? 'bg-primary text-primary-foreground'
+                              : 'bg-muted text-muted-foreground hover:bg-muted/80'
+                          }`}
+                        >
+                          <Avatar className="h-4 w-4">
+                            <AvatarFallback className="text-[8px]">{memberInitials.get(m.id) ?? '?'}</AvatarFallback>
+                          </Avatar>
+                          <span
+                            data-testid="chip-label"
+                            className="min-w-0 text-left [overflow-wrap:anywhere]"
+                            title={m.name ?? undefined}
+                          >
+                            {memberLabels.get(m.id) ?? '?'}
+                          </span>
+                          {isAssigned && <Check className="h-3 w-3" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </div>
 
-      {/* Per-person summary */}
-      {perPersonTotals.size > 0 && (
-        <Card data-testid="per-person-totals">
-          <CardHeader className="pb-2">
-            <CardTitle className="text-base">{t('perPersonTotals')}</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-1">
-            {members.map((m) => {
-              const total = perPersonTotals.get(m.id);
-              if (!total) return null;
-              return (
-                <div key={m.id} className="flex justify-between text-sm">
-                  <span>{m.name ?? t('unnamed')}</span>
-                  <span className="font-medium" data-testid={`person-total-${m.id}`}>
-                    {formatCents(total, currency, locale)}
-                  </span>
-                </div>
-              );
-            })}
-          </CardContent>
-        </Card>
-      )}
+        {/* Per-person summary */}
+        {perPersonTotals.size > 0 && (
+          <Card data-testid="per-person-totals">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-base">{t('perPersonTotals')}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1">
+              {members.map((m) => {
+                const total = perPersonTotals.get(m.id);
+                if (!total) return null;
+                return (
+                  <div key={m.id} className="flex justify-between text-sm">
+                    <span>{m.name ?? t('unnamed')}</span>
+                    <span className="font-medium" data-testid={`person-total-${m.id}`}>
+                      {formatCents(total, currency, locale)}
+                    </span>
+                  </div>
+                );
+              })}
+            </CardContent>
+          </Card>
+        )}
 
-      {createExpense.error && (
-        <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{createExpense.error.message}</div>
-      )}
+        {createExpense.error && (
+          <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{createExpense.error.message}</div>
+        )}
 
-      <Button
-        type="submit"
-        className="w-full"
-        disabled={createExpense.isPending || setCurrency.isPending || !allAssigned || !effectivePaidById}
-        data-testid="create-expense-btn"
-      >
-        {createExpense.isPending
-          ? t('creatingExpense')
-          : !allAssigned
-            ? t('assignAllItems', { remaining: items.length - assignedItemCount })
-            : t('createExpense')}
-      </Button>
-
-      {onSaveForLater && (
         <Button
-          type="button"
-          variant="outline"
+          type="submit"
           className="w-full"
-          onClick={handleSaveForLater}
-          disabled={saveForLater.isPending}
-          data-testid="save-for-later-btn"
+          disabled={createExpense.isPending || setCurrency.isPending || !allAssigned || !effectivePaidById}
+          data-testid="create-expense-btn"
         >
-          <Bookmark className="mr-2 h-4 w-4" />
-          {saveForLater.isPending ? t('saving') : t('saveForLater')}
+          {createExpense.isPending
+            ? t('creatingExpense')
+            : !allAssigned
+              ? t('assignAllItems', { remaining: items.length - assignedItemCount })
+              : t('createExpense')}
         </Button>
-      )}
-      <ConfirmDialog
-        open={removeItem !== null}
-        onOpenChange={(open) => !open && setRemoveItem(null)}
-        title={t('removeTitle', { name: removeItem?.name ?? '' })}
-        description={t('removeDescription')}
-        confirmLabel={t('remove')}
-        onConfirm={() => removeItem && deleteItem.mutate({ itemId: removeItem.id })}
-      />
+
+        {onSaveForLater && (
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full"
+            onClick={handleSaveForLater}
+            disabled={saveForLater.isPending}
+            data-testid="save-for-later-btn"
+          >
+            <Bookmark className="mr-2 h-4 w-4" />
+            {saveForLater.isPending ? t('saving') : t('saveForLater')}
+          </Button>
+        )}
+        <ConfirmDialog
+          open={removeItem !== null}
+          onOpenChange={(open) => !open && setRemoveItem(null)}
+          title={t('removeTitle', { name: removeItem?.name ?? '' })}
+          description={t('removeDescription')}
+          confirmLabel={t('remove')}
+          onConfirm={() => removeItem && deleteItem.mutate({ itemId: removeItem.id })}
+        />
+      </fieldset>
     </form>
   );
 }

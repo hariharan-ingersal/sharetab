@@ -1,8 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
 import { trpc } from '@/lib/trpc';
+import { newRequestKey } from '@/lib/guest-session';
 import { amountInputStep, centsToDecimal, currencyStep, formatCents, parseToCents } from '@/lib/money';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Button } from '@/components/ui/button';
@@ -96,6 +97,14 @@ function SettleForm({
   const [amountStr, setAmountStr] = useState(suggestedAmount ? centsToDecimal(suggestedAmount, fieldCurrency) : '');
   const [note, setNote] = useState('');
 
+  // This form's attempt to record a payment. Every send of it carries the same key, so a second
+  // click, or a retry after an answer that never arrived, gets back the payment the first send
+  // recorded instead of recording another. Opening the dialog again starts a new attempt.
+  const [requestKey] = useState(newRequestKey);
+  // Set as the request leaves, before React re-renders the button disabled: a second click in the
+  // same moment sends nothing
+  const sending = useRef(false);
+
   const utils = trpc.useUtils();
   const settle = trpc.settlements.create.useMutation({
     onSuccess: () => {
@@ -105,7 +114,14 @@ function SettleForm({
       utils.settlements.list.invalidate({ groupId });
       onOpenChange(false);
     },
+    onSettled: () => {
+      sending.current = false;
+    },
   });
+
+  // No answer, or a server failure: the payment may have been recorded. The form keeps what was
+  // sent, and sending it again is safe (same attempt), so it never becomes a second payment.
+  const unconfirmed = settle.error !== null && (!settle.error.data || (settle.error.data.httpStatus ?? 0) >= 500);
 
   // A fixed payer wins over the one picked, even when it arrives while the dialog is
   // open (its owner became a member), so what is sent is what From shows.
@@ -117,7 +133,8 @@ function SettleForm({
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     const amount = parseToCents(amountStr, fieldCurrency);
-    if (!toId || amount <= 0 || samePerson) return;
+    if (!toId || amount <= 0 || samePerson || sending.current) return;
+    sending.current = true;
     settle.mutate({
       groupId,
       fromId: effectiveFromId || undefined,
@@ -125,20 +142,41 @@ function SettleForm({
       amount,
       currency,
       note: note || undefined,
+      requestKey,
     });
   }
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
-      <div className="space-y-2">
-        <Label htmlFor="from">{t('settle.from')}</Label>
-        {payerId !== undefined ? (
-          <Input id="from" readOnly value={members.find((m) => m.id === payerId)?.name ?? t('settle.unnamed')} />
-        ) : (
+      <fieldset disabled={unconfirmed} className="space-y-4">
+        <div className="space-y-2">
+          <Label htmlFor="from">{t('settle.from')}</Label>
+          {payerId !== undefined ? (
+            <Input id="from" readOnly value={members.find((m) => m.id === payerId)?.name ?? t('settle.unnamed')} />
+          ) : (
+            <select
+              id="from"
+              value={fromId}
+              onChange={(e) => setFromId(e.target.value)}
+              required
+              className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <option value="">{t('settle.selectMember')}</option>
+              {members.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name ?? t('settle.unnamed')}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <Label htmlFor="to">{t('settle.to')}</Label>
           <select
-            id="from"
-            value={fromId}
-            onChange={(e) => setFromId(e.target.value)}
+            id="to"
+            value={toId}
+            onChange={(e) => setToId(e.target.value)}
             required
             className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
           >
@@ -149,67 +187,51 @@ function SettleForm({
               </option>
             ))}
           </select>
-        )}
-      </div>
+          {samePerson && (
+            <p className="text-sm text-destructive" data-testid="settle-same-person">
+              {t('settle.samePerson')}
+            </p>
+          )}
+        </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="to">{t('settle.to')}</Label>
-        <select
-          id="to"
-          value={toId}
-          onChange={(e) => setToId(e.target.value)}
-          required
-          className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-        >
-          <option value="">{t('settle.selectMember')}</option>
-          {members.map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.name ?? t('settle.unnamed')}
-            </option>
-          ))}
-        </select>
-        {samePerson && (
-          <p className="text-sm text-destructive" data-testid="settle-same-person">
-            {t('settle.samePerson')}
-          </p>
-        )}
-      </div>
+        <div className="space-y-2">
+          <Label htmlFor="settle-amount">{t('settle.amount')}</Label>
+          <Input
+            id="settle-amount"
+            type="number"
+            step={amountInputStep(fieldCurrency)}
+            min={amountInputStep(fieldCurrency)}
+            placeholder={centsToDecimal(0, fieldCurrency)}
+            value={amountStr}
+            onChange={(e) => setAmountStr(e.target.value)}
+            required
+          />
+          {suggestedAmount && (
+            <button
+              type="button"
+              onClick={() => setAmountStr(centsToDecimal(suggestedAmount, fieldCurrency))}
+              className="text-xs text-primary hover:underline"
+            >
+              {t('settle.useSuggested', { amount: formatCents(suggestedAmount, currency, locale) })}
+            </button>
+          )}
+        </div>
 
-      <div className="space-y-2">
-        <Label htmlFor="settle-amount">{t('settle.amount')}</Label>
-        <Input
-          id="settle-amount"
-          type="number"
-          step={amountInputStep(fieldCurrency)}
-          min={amountInputStep(fieldCurrency)}
-          placeholder={centsToDecimal(0, fieldCurrency)}
-          value={amountStr}
-          onChange={(e) => setAmountStr(e.target.value)}
-          required
-        />
-        {suggestedAmount && (
-          <button
-            type="button"
-            onClick={() => setAmountStr(centsToDecimal(suggestedAmount, fieldCurrency))}
-            className="text-xs text-primary hover:underline"
-          >
-            {t('settle.useSuggested', { amount: formatCents(suggestedAmount, currency, locale) })}
-          </button>
-        )}
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="note">{t('settle.note')}</Label>
-        <Input
-          id="note"
-          placeholder={t('settle.notePlaceholder')}
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-        />
-      </div>
+        <div className="space-y-2">
+          <Label htmlFor="note">{t('settle.note')}</Label>
+          <Input
+            id="note"
+            placeholder={t('settle.notePlaceholder')}
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+          />
+        </div>
+      </fieldset>
 
       {settle.error && (
-        <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{settle.error.message}</div>
+        <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive" data-testid="settle-error">
+          {unconfirmed ? t('settle.unconfirmed') : settle.error.message}
+        </div>
       )}
 
       <Button

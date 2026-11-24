@@ -136,7 +136,8 @@
     "validationNameRequired": "品目名は必須です。",
     "validationPricePositive": "価格はゼロより大きくする必要があります。",
     "validationQtyPositive": "数量は正の整数である必要があります。",
-    "receiptImageAlt": "レシート"
+    "receiptImageAlt": "レシート",
+    "locked": "このレシートは既に支出に使われているか、グループがアーカイブされているため、ここでは変更できません。分割を修正するには、支出を編集してください。"
   },
   "splits": {
     "selectAll": "すべて選択",

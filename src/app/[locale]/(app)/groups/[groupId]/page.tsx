@@ -35,6 +35,7 @@ import { PaymentsList } from '@/components/groups/payments-list';
 import { DeletedRecords } from '@/components/groups/deleted-records';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { getInitials, avatarColor } from '@/lib/avatar';
+import { newRequestKey } from '@/lib/guest-session';
 
 export default function GroupDetailPage({ params }: { params: Promise<{ groupId: string }> }) {
   const { groupId } = use(params);
@@ -85,9 +86,20 @@ export default function GroupDetailPage({ params }: { params: Promise<{ groupId:
     onSuccess: () => pendingReceipts.refetch(),
   });
 
+  // One attempt per Venmo debt confirmed, until it's recorded: confirming the same debt again after
+  // an answer that never arrived sends the same key, so it can't become a second payment
+  const venmoAttempts = useRef(new Map<string, string>());
+  const venmoAttemptKey = (debt: { from: string; to: string; amount: number }) => {
+    const id = `${debt.from}|${debt.to}|${debt.amount}`;
+    const key = venmoAttempts.current.get(id) ?? newRequestKey();
+    venmoAttempts.current.set(id, key);
+    return key;
+  };
+
   const utils = trpc.useUtils();
   const settleVenmo = trpc.settlements.create.useMutation({
-    onSuccess: () => {
+    onSuccess: (_payment, sent) => {
+      venmoAttempts.current.delete(`${sent.fromId}|${sent.toId}|${sent.amount}`);
       utils.balances.getGroupBalances.invalidate({ groupId });
       utils.balances.getSimplifiedDebts.invalidate({ groupId });
       utils.balances.getDashboard.invalidate();
@@ -583,6 +595,7 @@ export default function GroupDetailPage({ params }: { params: Promise<{ groupId:
             amount: venmoPaid.amount,
             currency: g.currency,
             note: t('detail.settledViaVenmo'),
+            requestKey: venmoAttemptKey(venmoPaid),
           })
         }
       />

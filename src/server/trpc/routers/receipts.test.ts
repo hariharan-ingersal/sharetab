@@ -2,13 +2,13 @@ import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { calculateReceiptSplitTotals } from '@/lib/split-calculator';
 import { getExchangeRate } from '@/server/lib/exchange-rates';
 import { Prisma } from '@/generated/prisma/client';
-import { processReceiptImage } from '@/server/lib/receipt-processor';
+import { lockEditableReceipt, processReceiptImage } from '@/server/lib/receipt-processor';
 
 vi.mock('next/headers', () => ({
   cookies: vi.fn().mockResolvedValue({ get: vi.fn().mockReturnValue(null) }),
 }));
 vi.mock('@/server/auth', () => ({ auth: vi.fn() }));
-vi.mock('@/server/lib/receipt-processor', () => ({ processReceiptImage: vi.fn() }));
+vi.mock('@/server/lib/receipt-processor', () => ({ processReceiptImage: vi.fn(), lockEditableReceipt: vi.fn() }));
 vi.mock('@/server/lib/exchange-rates', async (importOriginal) => ({
   ...(await importOriginal<object>()),
   getExchangeRate: vi.fn(),
@@ -57,6 +57,12 @@ async function caller(userId = 'u1') {
 beforeEach(() => {
   vi.clearAllMocks();
   mockDb.user.findUnique.mockResolvedValue({ suspendedAt: null });
+  // A receipt may be changed unless a test says otherwise (lockEditableReceipt is tested in
+  // receipt-processor.test.ts); its transactions run against the same mock
+  vi.mocked(lockEditableReceipt).mockResolvedValue(undefined);
+  mockDb.$transaction.mockImplementation(async (arg: unknown) =>
+    typeof arg === 'function' ? (arg as (tx: unknown) => unknown)(mockDb) : Promise.all(arg as Promise<unknown>[]),
+  );
 });
 
 describe('AI provider setup (#280)', () => {
@@ -1262,7 +1268,6 @@ describe("a receipt's currency when the scan can't tell (#361)", () => {
 // #361: the only way to correct a receipt's currency was Rescan with corrections, which reran the
 // whole scan, depended on the model obeying, and replaced every item
 describe("changing a receipt's currency (#361)", () => {
-  const rawSql = () => mockDb.$queryRaw.mock.calls.map(([strings]) => (strings as string[]).join('?'));
   const stored = { merchantName: 'Cafe', subtotal: 1000, tax: 80, tip: 0, total: 1080, currency: 'USD' };
   const receipt = (fields: object = {}) => ({
     id: 'r1',
@@ -1285,18 +1290,16 @@ describe("changing a receipt's currency (#361)", () => {
     const api = await caller();
     expect(await api.setCurrency({ receiptId: 'r1', currency: 'eur' })).toEqual({ currency: 'EUR' });
 
-    expect(rawSql()).toEqual(['SELECT 1 FROM "Receipt" WHERE "id" = ? FOR NO KEY UPDATE']);
+    // The row lock (with the refusal of a receipt that has its expense) is lockEditableReceipt's
+    expect(lockEditableReceipt).toHaveBeenCalledWith(mockDb, 'r1');
     expect(mockDb.receipt.update).toHaveBeenCalledWith({
       where: { id: 'r1' },
       data: { extractedData: { ...stored, currency: 'EUR' } },
     });
     // The receipt it changes is the one read after the lock
-    expect(mockDb.receipt.update.mock.invocationCallOrder[0]).toBeGreaterThan(
-      mockDb.$queryRaw.mock.invocationCallOrder[0]!,
-    );
-    expect(mockDb.receipt.findUnique.mock.invocationCallOrder.at(-1)).toBeGreaterThan(
-      mockDb.$queryRaw.mock.invocationCallOrder[0]!,
-    );
+    const locked = vi.mocked(lockEditableReceipt).mock.invocationCallOrder[0]!;
+    expect(mockDb.receipt.update.mock.invocationCallOrder[0]).toBeGreaterThan(locked);
+    expect(mockDb.receipt.findUnique.mock.invocationCallOrder.at(-1)).toBeGreaterThan(locked);
   });
 
   test.each(['', 'EURO', '$', 'U$D'])('refuses %j, which is not a currency code', async (currency) => {
@@ -1323,7 +1326,8 @@ describe("changing a receipt's currency (#361)", () => {
   });
 
   test('refuses a receipt that already has its expense, which keeps the currency it was saved in', async () => {
-    mockDb.expense.findUnique.mockResolvedValue({ id: 'e1' });
+    const { AppError } = await import('@/server/lib/app-error');
+    vi.mocked(lockEditableReceipt).mockRejectedValue(new AppError('BAD_REQUEST', 'receiptAlreadyHasExpense'));
     const api = await caller();
     await expect(api.setCurrency({ receiptId: 'r1', currency: 'EUR' })).rejects.toMatchObject({
       code: 'BAD_REQUEST',
@@ -1441,5 +1445,162 @@ describe('AI scan limits for signed-in users (#434)', () => {
       messageKey: 'processingRateLimited',
     });
     expect(processReceiptImage).toHaveBeenCalledTimes(2);
+  });
+});
+
+// A receipt an expense was made from (deleted or not), or one in an archived group, can't be changed:
+// the expense is what gets corrected. lockEditableReceipt decides (receipt-processor.test.ts);
+// here, every change takes it first and changes nothing when it refuses
+describe('changes to a receipt an expense was made from', () => {
+  type Api = Awaited<ReturnType<typeof caller>>;
+  const groupReceipt = {
+    id: 'r1',
+    status: 'COMPLETED',
+    groupId: 'g1',
+    uploadedById: 'u2',
+    imagePath: 'r1.jpg',
+    mimeType: 'image/jpeg',
+    extractedData: { tax: 80, tip: 0 },
+    group: { currency: 'USD', archivedAt: null, members: [{ userId: 'u1' }] },
+  };
+  const item = { id: 'i1', receiptId: 'r1', name: 'Wine', quantity: 2, unitPrice: 900, totalPrice: 1800, sortOrder: 0 };
+  const extra = mockDb as unknown as {
+    receiptItem: {
+      findUniqueOrThrow: ReturnType<typeof vi.fn>;
+      updateMany: ReturnType<typeof vi.fn>;
+      delete: ReturnType<typeof vi.fn>;
+    };
+    receipt: { findUniqueOrThrow: ReturnType<typeof vi.fn> };
+  };
+
+  async function refused() {
+    const { AppError } = await import('@/server/lib/app-error');
+    vi.mocked(lockEditableReceipt).mockRejectedValue(new AppError('BAD_REQUEST', 'receiptAlreadyHasExpense'));
+  }
+
+  beforeEach(() => {
+    mockDb.receipt.findUnique.mockResolvedValue(groupReceipt);
+    mockDb.receiptItem.findUnique.mockResolvedValue(item);
+    extra.receiptItem.findUniqueOrThrow = vi.fn().mockResolvedValue(item);
+    extra.receiptItem.updateMany = vi.fn();
+    extra.receiptItem.delete = vi.fn();
+    extra.receipt.findUniqueOrThrow = vi.fn().mockResolvedValue({ extractedData: groupReceipt.extractedData });
+  });
+
+  const changes: [string, (api: Api) => Promise<unknown>, () => unknown[]][] = [
+    [
+      'updateItem',
+      (api) => api.updateItem({ itemId: 'i1', totalPrice: 1500 }),
+      () => mockDb.receiptItem.update.mock.calls,
+    ],
+    [
+      'addItem',
+      (api) => api.addItem({ receiptId: 'r1', name: 'Bread', unitPrice: 300, totalPrice: 300 }),
+      () => mockDb.receiptItem.create.mock.calls,
+    ],
+    ['deleteItem', (api) => api.deleteItem({ itemId: 'i1' }), () => mockDb.receiptItemAssignment.deleteMany.mock.calls],
+    [
+      'splitItem',
+      (api) => api.splitItem({ itemId: 'i1', splitQuantity: 1 }),
+      () => mockDb.receiptItem.create.mock.calls,
+    ],
+    [
+      'updateExtractedData',
+      (api) => api.updateExtractedData({ receiptId: 'r1', tip: 300 }),
+      () => mockDb.receipt.update.mock.calls,
+    ],
+  ];
+
+  test.each(changes)('%s is refused, changing nothing', async (_name, change, writes) => {
+    await refused();
+    const api = await caller();
+    await expect(change(api)).rejects.toMatchObject({ code: 'BAD_REQUEST', messageKey: 'receiptAlreadyHasExpense' });
+    expect(lockEditableReceipt).toHaveBeenCalledWith(mockDb, 'r1');
+    expect(writes()).toEqual([]);
+  });
+
+  test.each(changes)('%s takes the receipt lock before it writes', async (_name, change, writes) => {
+    mockDb.receiptItem.findFirst.mockResolvedValue({ sortOrder: 0 });
+    const api = await caller();
+    await change(api);
+    expect(writes()).not.toEqual([]);
+    const firstWrite = Math.min(
+      ...[
+        mockDb.receiptItem.update,
+        mockDb.receiptItem.create,
+        mockDb.receiptItemAssignment.deleteMany,
+        mockDb.receipt.update,
+      ].flatMap((m) => m.mock.invocationCallOrder),
+    );
+    expect(vi.mocked(lockEditableReceipt).mock.invocationCallOrder[0]).toBeLessThan(firstWrite);
+  });
+
+  const scans: [string, (api: Api) => Promise<unknown>][] = [
+    ['processReceipt', (api) => api.processReceipt({ receiptId: 'r1' })],
+    ['retryProcessing', (api) => api.retryProcessing({ receiptId: 'r1' })],
+  ];
+
+  test.each(scans)('%s does not scan it again: no claim, no scan', async (_name, scan) => {
+    await refused();
+    const api = await caller();
+    await expect(scan(api)).rejects.toMatchObject({ messageKey: 'receiptAlreadyHasExpense' });
+    expect(mockDb.receipt.updateMany).not.toHaveBeenCalled();
+    expect(processReceiptImage).not.toHaveBeenCalled();
+  });
+
+  test('a refused rescan gives its AI scan back', async () => {
+    vi.stubEnv('USER_AI_LIMIT', '1');
+    try {
+      const api = await caller('u-lock');
+      mockDb.receipt.findUnique.mockResolvedValue({
+        ...groupReceipt,
+        uploadedById: 'u-lock',
+        groupId: null,
+        group: null,
+      });
+      await refused();
+      await expect(api.retryProcessing({ receiptId: 'r1' })).rejects.toMatchObject({
+        messageKey: 'receiptAlreadyHasExpense',
+      });
+      // The one scan the hour allows is still there
+      vi.mocked(lockEditableReceipt).mockResolvedValue(undefined);
+      mockDb.receipt.updateMany.mockResolvedValue({ count: 1 });
+      vi.mocked(processReceiptImage).mockResolvedValue({ status: 'COMPLETED' } as never);
+      await expect(api.retryProcessing({ receiptId: 'r1' })).resolves.toMatchObject({ status: 'COMPLETED' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  test.each(scans)(
+    '%s: a scan that finds an expense made meanwhile leaves the receipt as it is, not FAILED',
+    async (_name, scan) => {
+      const { AppError } = await import('@/server/lib/app-error');
+      mockDb.receipt.updateMany.mockResolvedValue({ count: 1 });
+      vi.mocked(processReceiptImage).mockRejectedValue(new AppError('BAD_REQUEST', 'receiptAlreadyHasExpense'));
+      const api = await caller();
+      await expect(scan(api)).rejects.toMatchObject({ messageKey: 'receiptAlreadyHasExpense' });
+      expect(mockDb.receipt.update).not.toHaveBeenCalled();
+    },
+  );
+
+  test('the receipt page is told it is read-only once an expense was made from it', async () => {
+    mockDb.receipt.findUnique.mockResolvedValue({ ...groupReceipt, items: [] });
+    const api = await caller();
+    mockDb.expense.findUnique.mockResolvedValue(null);
+    expect((await api.getReceiptItems({ receiptId: 'r1' })).receipt.locked).toBe(false);
+    mockDb.expense.findUnique.mockResolvedValue({ id: 'e1' });
+    expect((await api.getReceiptItems({ receiptId: 'r1' })).receipt.locked).toBe(true);
+  });
+
+  test('and in an archived group', async () => {
+    mockDb.receipt.findUnique.mockResolvedValue({
+      ...groupReceipt,
+      items: [],
+      group: { ...groupReceipt.group, archivedAt: new Date() },
+    });
+    mockDb.expense.findUnique.mockResolvedValue(null);
+    const api = await caller();
+    expect((await api.getReceiptItems({ receiptId: 'r1' })).receipt.locked).toBe(true);
   });
 });

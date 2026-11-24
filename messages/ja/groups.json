@@ -127,6 +127,7 @@
     "amount": "金額",
     "submit": "支払いを記録",
     "submitting": "記録中...",
+    "unconfirmed": "支払いが記録されたか確認できませんでした。もう一度お試しください。二重に記録されることはありません。",
     "description": "2人のグループメンバー間の支払いを記録します。",
     "selectMember": "メンバーを選択",
     "useSuggested": "提案額を使用: {amount}",
