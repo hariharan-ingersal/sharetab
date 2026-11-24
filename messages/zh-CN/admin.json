@@ -258,6 +258,7 @@
   "meridianAuth": {
     "title": "Meridian 认证",
     "cardTitle": "Claude OAuth 状态",
+    "securityReview": "需要进行安全审查：启用此集成之前，请检查并处理服务器代码中记录的未解决安全风险。",
     "authenticated": "已认证",
     "proxyNotRunning": "代理未运行",
     "loginInProgress": "登录中...",

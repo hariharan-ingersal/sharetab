@@ -258,6 +258,7 @@
   "meridianAuth": {
     "title": "Meridian-autentisering",
     "cardTitle": "Claude OAuth-status",
+    "securityReview": "Säkerhetsgranskning krävs: Innan du aktiverar den här integrationen, granska och åtgärda de kvarstående säkerhetsriskerna som är dokumenterade i serverkoden.",
     "authenticated": "Autentiserad",
     "proxyNotRunning": "Proxy körs inte",
     "loginInProgress": "Inloggning pågår...",

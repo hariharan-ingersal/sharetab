@@ -258,6 +258,7 @@
   "meridianAuth": {
     "title": "Meridian 인증",
     "cardTitle": "Claude OAuth 상태",
+    "securityReview": "보안 검토 필요: 이 통합을 활성화하기 전에 서버 코드에 문서화된 미해결 보안 위험을 검토하고 해결하세요.",
     "authenticated": "인증됨",
     "proxyNotRunning": "프록시가 실행되지 않음",
     "loginInProgress": "로그인 진행 중...",

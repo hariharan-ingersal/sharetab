@@ -177,6 +177,12 @@ export function MeridianAuthSection() {
               )}
             </div>
 
+            {/* Deferred Meridian security findings: see the comment at the top of src/server/ai/providers/meridian.ts */}
+            <p className="flex items-start gap-1.5 text-xs text-amber-700 dark:text-amber-400">
+              <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+              {t('meridianAuth.securityReview')}
+            </p>
+
             {normalizedStatusError && <p className="text-sm text-red-600 dark:text-red-400">{normalizedStatusError}</p>}
 
             {/* Login Flow */}

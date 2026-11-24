@@ -258,6 +258,7 @@
   "meridianAuth": {
     "title": "Meridian Authentication",
     "cardTitle": "Claude OAuth Status",
+    "securityReview": "Security review required: Before enabling this integration, review and address the outstanding security risks documented in the server code.",
     "authenticated": "Authenticated",
     "proxyNotRunning": "Proxy not running",
     "loginInProgress": "Login in progress...",

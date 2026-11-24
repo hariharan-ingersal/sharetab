@@ -1,3 +1,38 @@
+/*
+ * SECURITY: reassess before enabling Meridian (adding `meridian` to AI_PROVIDER_PRIORITY).
+ *
+ * These findings from the OAuth review were deferred while only openai-codex is in use. The
+ * Codex login has the fixes; Meridian's login (src/server/lib/meridian-login.ts) doesn't yet.
+ * The admin page's Meridian card says a review is needed, and while Meridian isn't configured
+ * nothing starts it (admin.testAIProvider and completeMeridianLogin refuse).
+ *
+ * - F2, concurrent token refreshes: `refreshIfNeeded` has no single-flight, and Claude Code
+ *   (run by Meridian) refreshes the same .credentials.json on its own. Two refreshes sent with
+ *   one single-use refresh token leave one refused, and a stale read-then-write can replace
+ *   newer tokens. Impact: forced Claude re-login, false expiry emails. Fix as for Codex
+ *   (`refreshInFlight` in openai-codex-login.ts), plus re-reading the file before writing in
+ *   case Claude Code refreshed meanwhile; no lock is shared with Claude Code's process.
+ * - F3, redirects: the token requests in `submitCode` and `refreshIfNeeded` follow redirects,
+ *   and a 307/308 re-sends the POST body (refresh token, or code and PKCE verifier) to the new
+ *   origin. Impact: credential leak if the token endpoint ever redirects somewhere hostile.
+ *   Fix: `redirect: 'error'`.
+ * - F4, credential writes: .credentials.json is written in place with writeFileSync, so Claude
+ *   Code or a health check can read a partial file (which reads as logged out), and
+ *   `mode: 0o600` only applies when the file is created (one copied in or restored as 0644
+ *   stays readable). Fix: write through `writeCredentialFile` (src/server/lib/credential-file.ts).
+ * - F8, Claude Code inside the container: Meridian runs Claude Code with
+ *   `permissionMode: "bypassPermissions"` and passes it this server's whole environment except
+ *   its own Anthropic keys (DATABASE_URL, AUTH_SECRET, SMTP and provider credentials), as the
+ *   same user, so it could also read /app/chatgpt/auth.json. What keeps a crafted receipt image
+ *   from getting it to read or send any of that is Meridian blocking Claude Code's file, shell
+ *   and web tools (BLOCKED_BUILTIN_TOOLS, checked in @rynfar/meridian 1.87.0), not ShareTab.
+ *   Impact if that block regresses: secrets and other providers' logins exfiltrated.
+ *
+ * Before enabling: fix F2–F4 or accept them; check BLOCKED_BUILTIN_TOOLS and the permission
+ * mode in the installed Meridian version (and again on every Meridian upgrade); keep guest
+ * uploads off and registration closed so only trusted people can submit images; and accept
+ * that the Claude and ChatGPT logins then share one trust boundary.
+ */
 import Anthropic from '@anthropic-ai/sdk';
 import type { AIProvider } from '../provider';
 import type { ReceiptExtractionResult } from '../schema';
