@@ -628,6 +628,61 @@ describe('testAIProvider', () => {
       }),
     });
   });
+
+  // C0: building a provider starts it, so one left out of AI_PROVIDER_PRIORITY stays off
+  describe('with only openai-codex in AI_PROVIDER_PRIORITY', () => {
+    beforeEach(async () => {
+      const { isProviderConfigured } = await import('@/server/ai/registry');
+      vi.mocked(isProviderConfigured).mockImplementation((name) => name === 'openai-codex');
+    });
+
+    afterEach(async () => {
+      const { isProviderConfigured } = await import('@/server/ai/registry');
+      vi.mocked(isProviderConfigured).mockReturnValue(true);
+    });
+
+    test.each(['meridian', 'claude', 'openai', 'ollama'])(
+      'testing %s is refused without building it',
+      async (providerName) => {
+        const api = await callerAs(adminSession);
+        await expect(api.testAIProvider({ ...input, providerName })).rejects.toMatchObject({
+          code: 'PRECONDITION_FAILED',
+          message: `Provider "${providerName}" is not available`,
+        });
+        expect(mockCreateProviderByName).not.toHaveBeenCalled();
+        expect(mockStartMeridianProxy).not.toHaveBeenCalled();
+        expect(mockDb.adminAuditLog.create).toHaveBeenCalledWith({
+          data: expect.objectContaining({
+            action: 'AI_PROVIDER_TESTED',
+            metadata: expect.objectContaining({ provider: providerName, success: false }),
+          }),
+        });
+      },
+    );
+
+    test('the configured provider is still tested', async () => {
+      const extractReceipt = vi.fn().mockResolvedValue({ items: [] });
+      mockCreateProviderByName.mockResolvedValue({
+        name: 'openai-codex',
+        isAvailable: vi.fn().mockResolvedValue(true),
+        extractReceipt,
+      });
+      const api = await callerAs(adminSession);
+      await expect(api.testAIProvider(input)).resolves.toMatchObject({ result: { items: [] } });
+      expect(mockCreateProviderByName).toHaveBeenCalledWith('openai-codex');
+      expect(extractReceipt).toHaveBeenCalledTimes(1);
+    });
+
+    test('completing a Meridian login is refused and starts nothing', async () => {
+      mockSubmitCode.mockResolvedValue({ success: true });
+      const api = await callerAs(adminSession);
+      await expect(api.completeMeridianLogin({ code: 'abc#state' })).rejects.toMatchObject({
+        code: 'PRECONDITION_FAILED',
+      });
+      expect(mockSubmitCode).not.toHaveBeenCalled();
+      expect(mockStartMeridianProxy).not.toHaveBeenCalled();
+    });
+  });
 });
 
 describe('Meridian login and status', () => {

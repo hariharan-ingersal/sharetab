@@ -1,6 +1,7 @@
 import { randomBytes, createHash } from 'crypto';
-import { mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
+import { mkdirSync, readFileSync, unlinkSync } from 'fs';
 import { dirname, join } from 'path';
+import { writeCredentialFile } from './credential-file';
 import { logger } from './logger';
 import { describeTokenError, MALFORMED_TOKEN_RESPONSE, readTokenBody } from './oauth-token-response';
 
@@ -78,6 +79,8 @@ interface OpenAICodexHealthCheckOptions {
 }
 
 let pendingLogin: PendingLogin | null = null;
+// The token refresh on the wire, if any (see refreshAuth)
+let refreshInFlight: Promise<ParsedStoredAuth | null> | null = null;
 let openAICodexHealthCache: { result: HealthStatus; expiresAt: number } | null = null;
 let openAICodexHealthInFlight: Promise<HealthStatus> | null = null;
 
@@ -200,7 +203,7 @@ function writeStoredAuth(tokens: { access_token: string; refresh_token: string; 
     last_refresh: new Date().toISOString(),
   };
 
-  writeFileSync(path, JSON.stringify(auth, null, 2), { mode: 0o600 });
+  writeCredentialFile(path, JSON.stringify(auth, null, 2));
 }
 
 function extractCodeAndState(input: string): { code: string; state: string | null } {
@@ -216,14 +219,44 @@ function extractCodeAndState(input: string): { code: string; state: string | nul
   }
 }
 
+/** Whether the access token is valid beyond EXPIRY_BUFFER_MS (an unknown expiry counts as expired) */
+function isUnexpired(auth: ParsedStoredAuth): boolean {
+  return auth.expiresAt !== null && auth.expiresAt - EXPIRY_BUFFER_MS > Date.now();
+}
+
+/**
+ * The stored auth, refreshed first when its access token expires within EXPIRY_BUFFER_MS (or
+ * always, with `force`, after the backend answered 401). A refresh token can be spent once:
+ * two refreshes sent with the same one leave one of them refused (OpenAI can also end the
+ * login when it sees one reused). So only one refresh is ever on the wire, and every caller
+ * that needs one while it runs, forced or not, gets its result: new tokens, which a forced
+ * caller uses in place of the one that got the 401. When that shared refresh fails, a caller that wasn't
+ * forced gets the stored auth if its access token is still valid, and null otherwise: it
+ * doesn't send the same refresh token again.
+ */
 async function refreshAuth(force = false): Promise<ParsedStoredAuth | null> {
+  if (refreshInFlight) {
+    const refreshed = await refreshInFlight;
+    if (refreshed || force) return refreshed;
+    const current = readStoredAuth();
+    return current && isUnexpired(current) ? current : null;
+  }
+
   const stored = readStoredAuth();
   if (!stored?.refreshToken) return null;
 
-  if (!force && stored.expiresAt && stored.expiresAt - EXPIRY_BUFFER_MS > Date.now()) {
+  if (!force && isUnexpired(stored)) {
     return stored;
   }
 
+  // Set before any await, so a caller arriving next joins this refresh
+  refreshInFlight = requestRefresh(stored).finally(() => {
+    refreshInFlight = null;
+  });
+  return refreshInFlight;
+}
+
+async function requestRefresh(stored: ParsedStoredAuth): Promise<ParsedStoredAuth | null> {
   const body = new URLSearchParams({
     client_id: CLIENT_ID,
     grant_type: 'refresh_token',
@@ -237,6 +270,8 @@ async function refreshAuth(force = false): Promise<ParsedStoredAuth | null> {
       originator: ORIGINATOR,
     },
     body,
+    // A 307/308 would re-send this body, refresh token included, to wherever it points
+    redirect: 'error',
     signal: AbortSignal.timeout(30_000),
   });
 
@@ -349,6 +384,8 @@ export async function submitCode(codeOrUrl: string): Promise<{ success: boolean;
         originator: ORIGINATOR,
       },
       body: body.toString(),
+      // A 307/308 would re-send the code and PKCE verifier to wherever it points
+      redirect: 'error',
       signal: AbortSignal.timeout(30_000),
     });
 

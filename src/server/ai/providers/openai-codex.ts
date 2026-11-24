@@ -56,24 +56,29 @@ function extractTextPayload(response: unknown): string {
   throw new Error('OpenAI Codex returned no text output');
 }
 
-function extractCodexErrorMessage(response: unknown): string | null {
+// The backend's error text is the upstream's to word: it can quote the request, and it ends up
+// in the server log, the admin page and the admin audit log (which the admin export includes).
+// Only an error code shaped like an identifier (`usage_limit_reached`) is kept: lowercase
+// letters, digits and underscores, which no free-text message or token is.
+const CODEX_ERROR_CODE = /^[a-z][a-z0-9_]{1,63}$/;
+
+function codexErrorCode(value: unknown): string | null {
+  return typeof value === 'string' && CODEX_ERROR_CODE.test(value) ? value : null;
+}
+
+/** The error code in a backend error body or a failed response (`code`, or `error.code` / `error.type`) */
+function extractCodexErrorCode(response: unknown): string | null {
   if (!response || typeof response !== 'object') {
     return null;
   }
 
   const record = response as Record<string, unknown>;
-  const topLevelMessage = record.message;
-  if (typeof topLevelMessage === 'string' && topLevelMessage.trim()) {
-    return topLevelMessage;
-  }
-
   const error = record.error;
-  if (!error || typeof error !== 'object') {
-    return null;
+  if (error && typeof error === 'object') {
+    const { code, type } = error as { code?: unknown; type?: unknown };
+    return codexErrorCode(code) ?? codexErrorCode(type);
   }
-
-  const message = (error as { message?: unknown }).message;
-  return typeof message === 'string' && message.trim() ? message : null;
+  return codexErrorCode(error) ?? codexErrorCode(record.code);
 }
 
 export function extractTextFromCodexStream(body: string): string {
@@ -117,11 +122,8 @@ export function extractTextFromCodexStream(body: string): string {
         break;
       }
       case 'response.failed': {
-        const message =
-          extractCodexErrorMessage(event.response) ??
-          extractCodexErrorMessage(event.error) ??
-          'OpenAI Codex stream failed';
-        throw new Error(message);
+        const code = extractCodexErrorCode(event.response) ?? extractCodexErrorCode(event);
+        throw new Error(`OpenAI Codex stream failed${code ? `: ${code}` : ''}`);
       }
       case 'response.incomplete': {
         const reason =
@@ -133,7 +135,7 @@ export function extractTextFromCodexStream(body: string): string {
               incomplete_details?: { reason?: unknown };
             }
           ).incomplete_details?.reason;
-        throw new Error(`OpenAI Codex stream incomplete: ${typeof reason === 'string' ? reason : 'unknown'}`);
+        throw new Error(`OpenAI Codex stream incomplete: ${codexErrorCode(reason) ?? 'unknown'}`);
       }
       case 'response.completed':
         completed = true;
@@ -220,8 +222,9 @@ async function performRequest(body: object): Promise<string> {
   }
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`OpenAI Codex request failed (${response.status}): ${text}`);
+    // The status and at most an error code: the body is upstream text (see CODEX_ERROR_CODE)
+    const code = extractCodexErrorCode(await response.json().catch(() => null));
+    throw new Error(`OpenAI Codex request failed (${response.status})${code ? `: ${code}` : ''}`);
   }
 
   const raw = await response.text();
@@ -234,15 +237,14 @@ async function performRequest(body: object): Promise<string> {
     return extractTextFromCodexStream(trimmed);
   }
 
+  // A JSON parser's message quotes the start of the body, so a body that isn't JSON fails with a fixed error
+  let parsed: unknown;
   try {
-    return extractTextPayload(JSON.parse(trimmed));
-  } catch (error) {
-    throw new Error(
-      `OpenAI Codex returned an unexpected response format: ${
-        error instanceof Error ? error.message : 'unknown error'
-      }`,
-    );
+    parsed = JSON.parse(trimmed);
+  } catch {
+    throw new Error('OpenAI Codex returned an unexpected response format');
   }
+  return extractTextPayload(parsed);
 }
 
 /**

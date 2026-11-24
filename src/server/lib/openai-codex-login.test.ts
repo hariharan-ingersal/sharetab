@@ -1,3 +1,4 @@
+import { join } from 'path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 vi.mock('@/server/lib/logger', () => ({
@@ -68,6 +69,7 @@ describe('OpenAICodexLogin', () => {
     const mockWriteFileSync = vi.fn();
     vi.doMock('fs', () => ({
       mkdirSync: vi.fn(),
+      renameSync: vi.fn(),
       readFileSync: vi.fn(),
       writeFileSync: mockWriteFileSync,
       unlinkSync: vi.fn(),
@@ -135,6 +137,7 @@ describe('OpenAICodexLogin', () => {
     const mockWriteFileSync = vi.fn();
     vi.doMock('fs', () => ({
       mkdirSync: vi.fn(),
+      renameSync: vi.fn(),
       readFileSync: () =>
         JSON.stringify({
           auth_mode: 'Chatgpt',
@@ -186,6 +189,7 @@ describe('OpenAICodexLogin', () => {
 
     vi.doMock('fs', () => ({
       mkdirSync: vi.fn(),
+      renameSync: vi.fn(),
       readFileSync: () =>
         JSON.stringify({
           auth_mode: 'Chatgpt',
@@ -228,6 +232,7 @@ describe('OpenAICodexLogin', () => {
 
     vi.doMock('fs', () => ({
       mkdirSync: vi.fn(),
+      renameSync: vi.fn(),
       readFileSync: () =>
         JSON.stringify({
           auth_mode: 'Chatgpt',
@@ -270,6 +275,7 @@ describe('OpenAICodexLogin', () => {
 
     vi.doMock('fs', () => ({
       mkdirSync: vi.fn(),
+      renameSync: vi.fn(),
       readFileSync: () =>
         JSON.stringify({
           auth_mode: 'Chatgpt',
@@ -310,6 +316,7 @@ describe('OpenAICodexLogin', () => {
 
     vi.doMock('fs', () => ({
       mkdirSync: vi.fn(),
+      renameSync: vi.fn(),
       readFileSync: () =>
         JSON.stringify({
           auth_mode: 'Chatgpt',
@@ -342,6 +349,7 @@ describe('OpenAICodexLogin', () => {
       const expired = jwtExpiringIn(-60);
       vi.doMock('fs', () => ({
         mkdirSync: vi.fn(),
+        renameSync: vi.fn(),
         readFileSync: () =>
           JSON.stringify({
             auth_mode: 'Chatgpt',
@@ -356,6 +364,7 @@ describe('OpenAICodexLogin', () => {
     async function exchange(response: Response) {
       vi.doMock('fs', () => ({
         mkdirSync: vi.fn(),
+        renameSync: vi.fn(),
         readFileSync: vi.fn(),
         writeFileSync: vi.fn(),
         unlinkSync: vi.fn(),
@@ -489,6 +498,7 @@ describe('OpenAICodexLogin', () => {
       const current = jwtExpiringIn(3600);
       vi.doMock('fs', () => ({
         mkdirSync: vi.fn(),
+        renameSync: vi.fn(),
         readFileSync: () =>
           JSON.stringify({
             auth_mode: 'Chatgpt',
@@ -511,6 +521,7 @@ describe('OpenAICodexLogin', () => {
     const mockUnlinkSync = vi.fn();
     vi.doMock('fs', () => ({
       mkdirSync: vi.fn(),
+      renameSync: vi.fn(),
       readFileSync: vi.fn(),
       writeFileSync: vi.fn(),
       unlinkSync: mockUnlinkSync,
@@ -529,6 +540,7 @@ describe('OpenAICodexLogin', () => {
   test('logout succeeds when auth file is missing', async () => {
     vi.doMock('fs', () => ({
       mkdirSync: vi.fn(),
+      renameSync: vi.fn(),
       readFileSync: vi.fn(),
       writeFileSync: vi.fn(),
       unlinkSync: () => {
@@ -540,5 +552,159 @@ describe('OpenAICodexLogin', () => {
 
     const { logout } = await import('./openai-codex-login');
     expect(logout()).toEqual({ success: true });
+  });
+
+  // F1: a refresh token can be spent once, so concurrent callers share one refresh
+  describe('one token refresh at a time', () => {
+    /** auth.json held in memory: a write lands on a temporary file, which rename puts in place */
+    function storedAuth(accessExpiresInSeconds: number) {
+      const files = new Map<string, string>();
+      const authPath = join(process.env.OPENAI_CODEX_DIR!, 'auth.json');
+      const token = jwtExpiringIn(accessExpiresInSeconds);
+      files.set(
+        authPath,
+        JSON.stringify({
+          auth_mode: 'Chatgpt',
+          tokens: { id_token: token, access_token: token, refresh_token: REFRESH_TOKEN, account_id: 'acct_123' },
+        }),
+      );
+      vi.doMock('fs', () => ({
+        mkdirSync: vi.fn(),
+        readFileSync: (path: string) => {
+          const data = files.get(path);
+          if (data === undefined) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+          return data;
+        },
+        writeFileSync: (path: string, data: string) => void files.set(path, data),
+        renameSync: (from: string, to: string) => {
+          files.set(to, files.get(from)!);
+          files.delete(from);
+        },
+        unlinkSync: (path: string) => void files.delete(path),
+      }));
+      const stored = () =>
+        JSON.parse(files.get(authPath)!) as { tokens: { access_token: string; refresh_token: string } };
+      return { files, authPath, token, stored };
+    }
+
+    /** The next token request stays unanswered until the returned function answers it */
+    function heldTokenRequest() {
+      let answer!: (response: Response) => void;
+      vi.mocked(fetch).mockImplementationOnce(() => new Promise<Response>((resolve) => (answer = resolve)));
+      return (body: object, status = 200) => answer(new Response(JSON.stringify(body), { status }));
+    }
+
+    const refreshBodies = () =>
+      vi.mocked(fetch).mock.calls.map(([, init]) => (init?.body as URLSearchParams).get('refresh_token'));
+
+    test('callers needing a refresh at once send one refresh and all get its tokens', async () => {
+      const { files, authPath, stored } = storedAuth(-60);
+      const answer = heldTokenRequest();
+      const { getAccessTokenForApi, refreshIfNeeded, retryAfterUnauthorized } = await import('./openai-codex-login');
+
+      const scans = [getAccessTokenForApi(), getAccessTokenForApi(), getAccessTokenForApi()];
+      const poller = refreshIfNeeded();
+      const after401 = retryAfterUnauthorized();
+      const fresh = jwtExpiringIn(3600);
+      answer({ id_token: fresh, access_token: fresh, refresh_token: 'rt_ROTATED' });
+
+      for (const auth of await Promise.all([...scans, after401])) expect(auth?.accessToken).toBe(fresh);
+      expect(await poller).toBe(true);
+      expect(refreshBodies()).toEqual([REFRESH_TOKEN]);
+      expect(stored().tokens.refresh_token).toBe('rt_ROTATED');
+      expect([...files.keys()]).toEqual([authPath]);
+    });
+
+    test('forced refreshes after concurrent 401s send one refresh', async () => {
+      storedAuth(3600);
+      const answer = heldTokenRequest();
+      const { retryAfterUnauthorized } = await import('./openai-codex-login');
+      const calls = [retryAfterUnauthorized(), retryAfterUnauthorized(), retryAfterUnauthorized()];
+      const fresh = jwtExpiringIn(3600);
+      answer({ id_token: fresh, access_token: fresh, refresh_token: 'rt_ROTATED' });
+      for (const auth of await Promise.all(calls)) expect(auth?.accessToken).toBe(fresh);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('a failed shared refresh is not sent again: forced callers get null, a still-valid token is kept', async () => {
+      const { token } = storedAuth(3600);
+      const answer = heldTokenRequest();
+      const { getAccessTokenForApi, retryAfterUnauthorized } = await import('./openai-codex-login');
+      const forced = retryAfterUnauthorized();
+      const scan = getAccessTokenForApi();
+      answer({ error: 'invalid_grant' }, 400);
+      expect(await forced).toBeNull();
+      expect((await scan)?.accessToken).toBe(token);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('an expired token whose shared refresh fails gives every caller null, after one refresh', async () => {
+      storedAuth(-60);
+      const answer = heldTokenRequest();
+      const { getAccessTokenForApi } = await import('./openai-codex-login');
+      const calls = [getAccessTokenForApi(), getAccessTokenForApi(), getAccessTokenForApi()];
+      answer({ error: 'invalid_grant' }, 400);
+      expect(await Promise.all(calls)).toEqual([null, null, null]);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    test('refreshes one after another each send the refresh token the last one stored', async () => {
+      storedAuth(3600);
+      const first = jwtExpiringIn(3600);
+      const second = jwtExpiringIn(7200);
+      vi.mocked(fetch)
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ id_token: first, access_token: first, refresh_token: 'rt_FIRST' })),
+        )
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ id_token: second, access_token: second, refresh_token: 'rt_SECOND' })),
+        );
+      const { retryAfterUnauthorized } = await import('./openai-codex-login');
+      expect((await retryAfterUnauthorized())?.accessToken).toBe(first);
+      expect((await retryAfterUnauthorized())?.accessToken).toBe(second);
+      expect(refreshBodies()).toEqual([REFRESH_TOKEN, 'rt_FIRST']);
+    });
+
+    test('a refresh that throws leaves none in flight, so the next call refreshes', async () => {
+      storedAuth(-60);
+      const fresh = jwtExpiringIn(3600);
+      vi.mocked(fetch)
+        .mockRejectedValueOnce(new Error('fetch failed'))
+        .mockResolvedValueOnce(
+          new Response(JSON.stringify({ id_token: fresh, access_token: fresh, refresh_token: 'rt_ROTATED' })),
+        );
+      const { getAccessTokenForApi } = await import('./openai-codex-login');
+      await expect(getAccessTokenForApi()).rejects.toThrow('fetch failed');
+      expect((await getAccessTokenForApi())?.accessToken).toBe(fresh);
+    });
+  });
+
+  // F3: a 307/308 re-sends a POST body to wherever it points, and these bodies hold credentials
+  test('both token requests refuse redirects', async () => {
+    vi.doMock('fs', () => ({
+      mkdirSync: vi.fn(),
+      renameSync: vi.fn(),
+      readFileSync: () => {
+        const expired = jwtExpiringIn(-60);
+        return JSON.stringify({
+          auth_mode: 'Chatgpt',
+          tokens: { id_token: expired, access_token: expired, refresh_token: REFRESH_TOKEN, account_id: 'acct_123' },
+        });
+      },
+      writeFileSync: vi.fn(),
+      unlinkSync: vi.fn(),
+    }));
+    const fresh = jwtExpiringIn(3600);
+    const tokens = () => new Response(JSON.stringify({ id_token: fresh, access_token: fresh, refresh_token: 'rt_x' }));
+    vi.mocked(fetch).mockResolvedValueOnce(tokens()).mockResolvedValueOnce(tokens());
+    const { refreshIfNeeded, startLogin, submitCode } = await import('./openai-codex-login');
+
+    expect(await refreshIfNeeded()).toBe(true);
+    await startLogin();
+    expect(await submitCode(CODE)).toEqual({ success: true });
+
+    const inits = vi.mocked(fetch).mock.calls.map(([, init]) => init);
+    expect(inits).toHaveLength(2);
+    for (const init of inits) expect(init?.redirect).toBe('error');
   });
 });

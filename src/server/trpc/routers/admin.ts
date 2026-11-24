@@ -1157,6 +1157,11 @@ export const adminRouter = createTRPCRouter({
   completeMeridianLogin: adminProcedure
     .input(z.object({ code: z.string().min(1).max(500) }))
     .mutation(async ({ ctx, input }) => {
+      // A successful login starts the proxy, so a disabled Meridian refuses here too (a login
+      // can only begin through startMeridianLogin, which also checks)
+      if (!isProviderConfigured('meridian')) {
+        throw new AppError('PRECONDITION_FAILED', 'meridianNotConfigured');
+      }
       try {
         const result = await submitCode(input.code);
 
@@ -1318,6 +1323,20 @@ export const adminRouter = createTRPCRouter({
     )
     .mutation(async ({ ctx, input }) => {
       const start = Date.now();
+      // Only a provider in AI_PROVIDER_PRIORITY is built: building one starts it, and a
+      // disabled one must stay off (Meridian's isAvailable() starts its proxy, whose health
+      // check runs Claude Code with this server's environment). The page lists only these.
+      if (!isProviderConfigured(input.providerName)) {
+        const error = new AppError('PRECONDITION_FAILED', 'providerUnavailable', { provider: input.providerName });
+        await logAdminAction(ctx.db, ctx.user.id, 'AI_PROVIDER_TESTED', null, {
+          provider: input.providerName,
+          durationMs: Date.now() - start,
+          success: false,
+          error: error.message,
+        });
+        throw error;
+      }
+
       let provider;
       try {
         provider = await createProviderByName(input.providerName);
