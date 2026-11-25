@@ -356,12 +356,15 @@ if [[ -n "$MERIDIAN_AUTH" ]]; then
   auth_mount=(--mount "type=volume,src=$AUTH_VOLUME,dst=/app/claude")
 fi
 secret=$(openssl rand -base64 32)
-# Only the variables the README calls required, plus ADMIN_EMAIL: the Meridian
-# check below signs in, so it also checks that no NEXTAUTH_URL or
-# AUTH_TRUST_HOST is needed for that (#417).
+# Only the variables the README calls required, plus ADMIN_EMAIL and
+# AI_PROVIDER_PRIORITY: the Meridian check below signs in, so it also checks
+# that no NEXTAUTH_URL or AUTH_TRUST_HOST is needed for that (#417), and it
+# tests the meridian provider, which admin.testAIProvider builds only when it
+# is in AI_PROVIDER_PRIORITY (a provider left out must not start).
 # ${auth_mount[@]+...} keeps an empty array from tripping set -u in bash < 4.4.
 docker run -d --name "$CONTAINER" --label sharetab-smoke \
   -e NEXTAUTH_SECRET="$secret" -e AUTH_SECRET="$secret" -e ADMIN_EMAIL="$ADMIN_EMAIL" \
+  -e AI_PROVIDER_PRIORITY=meridian \
   ${auth_mount[@]+"${auth_mount[@]}"} "$IMAGE" >/dev/null
 wait_healthy "first start"
 # The tables exist, not just a reachable database (psql fails if either is

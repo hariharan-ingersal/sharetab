@@ -86,6 +86,8 @@ if (process.env.LIVE) {
     console.log(`meridian /health: ${healthRes.status} ${healthBody.slice(0, 600)}`);
     health = { status: healthRes.status, body: JSON.parse(healthBody) };
   } catch (err) {
+    // Also what the app refusing the provider before starting it looks like
+    // (meridian not in the container's AI_PROVIDER_PRIORITY).
     fail(`the provider reported itself unavailable, and Meridian's /health gave no answer: ${err}`);
   }
   if (health.status !== 503 || health.body?.status !== 'unhealthy' || health.body?.auth?.loggedIn !== false) {
